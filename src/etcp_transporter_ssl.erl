@@ -248,6 +248,7 @@ get_options(Sock, _Opts) ->
                      ,send_timeout_close
                      ,show_econnreset
                      ,sndbuf
+%%                     ,ipv6_v6only %% Generates stupid error :-S
                      ,tos]) of
         {ok, _}=Ok ->
             Ok;

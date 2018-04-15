@@ -65,25 +65,13 @@
                           ,'connection_debug' => debug()
                           ,'connection_process_registry' => boolean()}.
 
--type acceptor_mode() :: 'accept' | 'sleep'.
+-type acceptor_mode() :: 'accept' | 'sleep'.git
 
 -type debug() :: [sys:dbg_opt()] | [].
 
--type transporter_options() :: term().
-
--type connection_plan() :: fun((Rsn::any()) ->
-                                  'restart'                  |
-                                  {'restart', pos_integer()} |
-                                  'delete'                   |
-                                  'wait'                     |
-                                  'stop'                     |
-                                  {'stop', Rsn2::any()})     .
-
--type connection_error_logger() :: fun((Rsn::any()) -> any()).
-
--type connection_table_type() :: 'list' | {'ets', atom()} | {'mnesia', atom()}.
-
--type server_error_logger() :: fun((Name::register_name(), Rsn::any()) -> any()).
+-type transporter_options() :: term(). % Depends on transporter module
+                                       % for etcp_transporter_tcp module use gen_tcp:options()
+                                       % for etcp_transporter_ssl module use ssl:options()
 
 -type port_number() :: inet:port_number().
 
@@ -92,7 +80,9 @@
 -type addresses() :: [] | [address()].
 -type  address() :: {host(), port_number()} | {'undefined', 'undefined'}.
 
--type packet() :: any(). %% Depends on transporter module
+-type packet() :: any(). % Depends on transporter module
+                         % for etcp_transporter_tcp etcp_transporter_ssl modules:
+                         %  string() | binary() | iolist()
 
 -type shutdown_type() :: 'read' | 'write' | 'read_write'.
 
@@ -113,14 +103,12 @@
 -type callback_return_options() :: [] | [callback_return_option()].
 -type  callback_return_option() :: {'state', any()}
                                  | {'timeout', timeout()}
-                                 | {'srtimeout', timeout()}
-                                 | {'length', etcp_types:length()}
                                  | {'packet', etcp_types:packet()}
                                  | {'transporter', module()}
                                  | {'socket', etcp_types:socket()}
-                                 | {'setopts', list()}
-                                 | 'fetch_peername'
-                                 | 'hibernate'.
+                                 | {'setopts', any()}
+                                 | {'hibernate', boolean()}.
+
 -type reason() :: any().
 -type terminate_callback_return() :: {'new_error', NewReason::reason()} | any().
 -type code_change_callback_return() :: {'ok', state()}.
@@ -153,10 +141,6 @@
              ,terminate_callback_return/0
              ,code_change_callback_return/0
              ,listen_init_callback_return/0
-             ,connection_table_type/0
              ,transporter_callback_error/0
              ,debug/0
-             ,connection_plan/0
-             ,connection_error_logger/0
-             ,server_error_logger/0
              ,transporter_options/0]).

@@ -65,7 +65,7 @@
                           ,'connection_debug' => debug()
                           ,'connection_process_registry' => boolean()}.
 
--type acceptor_mode() :: 'accept' | 'sleep'.git
+-type acceptor_mode() :: 'accept' | 'sleep'.
 
 -type debug() :: [sys:dbg_opt()] | [].
 

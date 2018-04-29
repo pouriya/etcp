@@ -6,7 +6,8 @@
         ,get_ssl_key_file/1
         ,make_callback_return/2
         ,timestamp/0
-        ,run_log/3]).
+        ,run_log/3
+        ,messages/0]).
 
 
 
@@ -38,7 +39,14 @@ make_callback_return(Pid, {Mod, Func, Args}) ->
     Pid ! {erlang:self(), Ref, Mod, Func},
     receive
         {Ref, Fun} ->
-            erlang:apply(Fun, Args)
+            (catch erlang:apply(Fun, Args))
+    after 5000 ->
+        exit({timeout, [{pid, Pid}
+                       ,{callback_module, Mod}
+                       ,{callback_function, Func}
+                       ,{argumnets, Args}
+                       ,{timeout, 5000}
+                       ,{messages, lists:reverse(messages())}]})
     end.
 
 

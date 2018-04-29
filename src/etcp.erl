@@ -62,9 +62,8 @@
         ,start_link_connection_pool/5
         ,stop_connection_pool/1
         ,stop_connection_pool/2
-        ,fetch_pool_connections/2
-        ,add_connection/3
-        ,add_connections/4]).
+        ,fetch_pool_connections/1
+        ,add_connection/3]).
 
 %% Client API:
 -export([start_link_connection/4
@@ -168,7 +167,7 @@ start_link_server(module(), etcp_types:init_argument(), etcp_types:port_number()
 %% @end
 start_link_server(Mod, InitArg, Port) when erlang:is_atom(Mod),
                                            erlang:is_integer(Port) ->
-    etcp_server_sup:start_link(Mod, InitArg, Port).
+    etcp_server:start_link(Mod, InitArg, Port).
 
 
 -spec
@@ -189,7 +188,7 @@ start_link_server(Name_or_Mod
                                      (erlang:is_atom(Name_or_Mod) andalso
                                       erlang:is_integer(InitArg_or_Port) andalso
                                       erlang:is_map(Port_or_Opts))->
-    etcp_server_sup:start_link(Name_or_Mod, Mod_or_InitArg, InitArg_or_Port, Port_or_Opts).
+    etcp_server:start_link(Name_or_Mod, Mod_or_InitArg, InitArg_or_Port, Port_or_Opts).
 
 
 -spec
@@ -206,7 +205,7 @@ start_link_server(Name, Mod, InitArg, Port, Opts) when erlang:is_tuple(Name) and
                                                        erlang:is_atom(Mod) andalso
                                                        erlang:is_integer(Port) andalso
                                                        erlang:is_map(Opts) ->
-    etcp_server_sup:start_link(Name, Mod, InitArg, Port, Opts).
+    etcp_server:start_link(Name, Mod, InitArg, Port, Opts).
 
 
 -spec
@@ -216,7 +215,7 @@ fetch_server_connections(etcp_types:name()) ->
 %%      Returns all available server connections.
 %% @end
 fetch_server_connections(Server) when ?is_proc_ref(Server) ->
-    etcp_server_sup:connections(Server).
+    etcp_server:connections(Server).
 
 
 -spec
@@ -226,7 +225,7 @@ fetch_acceptors(etcp_types:name()) ->
 %%      Returns all server acceptors.
 %% @end
 fetch_acceptors(Server) when ?is_proc_ref(Server) ->
-    etcp_server_sup:acceptors(Server).
+    etcp_server:acceptors(Server).
 
 
 -spec
@@ -236,7 +235,7 @@ sleep(etcp_types:name()) ->
 %%      Turns all server acceptors to sleep mode.
 %% @end
 sleep(Server) when ?is_proc_ref(Server) ->
-    etcp_server_sup:sleep(Server).
+    etcp_server:sleep(Server).
 
 
 -spec
@@ -246,7 +245,7 @@ accept(etcp_types:name()) ->
 %%      Turns all server acceptors to accept mode.
 %% @end
 accept(Server) when ?is_proc_ref(Server) ->
-    etcp_server_sup:accept(Server).
+    etcp_server:accept(Server).
 
 
 -spec
@@ -256,7 +255,7 @@ modes(etcp_types:name()) ->
 %%      Returns mode(s) of server acceptors.
 %% @end
 modes(Server) when ?is_proc_ref(Server) ->
-    etcp_server_sup:modes(Server).
+    etcp_server:modes(Server).
 
 
 -spec
@@ -266,7 +265,7 @@ stop_server(etcp_types:name()) ->
 %%      stops server and all connections it has.
 %% @end
 stop_server(Server) when ?is_proc_ref(Server) ->
-    etcp_server_sup:stop(Server).
+    etcp_server:stop(Server).
 
 
 -spec
@@ -276,7 +275,7 @@ stop_server(etcp_types:name(), etcp_types:reason())->
 %%      stops server and all connections it has.
 %% @end
 stop_server(Server, Reason) when ?is_proc_ref(Server) ->
-    etcp_server_sup:stop(Server, Reason).
+    etcp_server:stop(Server, Reason).
 
 
 -spec
@@ -287,7 +286,7 @@ start_link_connection_pool(module(), etcp_types:init_argument(), etcp_types:addr
 %% @end
 start_link_connection_pool(Mod, InitArg, Addrs) when erlang:is_atom(Mod) andalso
                                                     erlang:is_list(Addrs) ->
-    etcp_connection_sup:start_link(Mod, InitArg, Addrs).
+    etcp_connection_pool:start_link(Mod, InitArg, Addrs).
 
 
 -spec
@@ -308,7 +307,7 @@ start_link_connection_pool(Name_or_Mod
                                               (erlang:is_atom(Name_or_Mod) andalso
                                                erlang:is_list(InitArg_or_Addrs) andalso
                                                erlang:is_map(Addrs_or_Opts)) ->
-    etcp_connection_sup:start_link(Name_or_Mod, Mod_or_InitArg, InitArg_or_Addrs, Addrs_or_Opts).
+    etcp_connection_pool:start_link(Name_or_Mod, Mod_or_InitArg, InitArg_or_Addrs, Addrs_or_Opts).
 
 
 -spec
@@ -325,18 +324,17 @@ start_link_connection_pool(Name, Mod, InitArg, Addrs, Opts) when erlang:is_tuple
                                                                  erlang:is_atom(Mod) andalso
                                                                  erlang:is_list(Addrs) andalso
                                                                  erlang:is_map(Opts) ->
-    etcp_connection_sup:start_link(Name, Mod, InitArg, Addrs, Opts).
+    etcp_connection_pool:start_link(Name, Mod, InitArg, Addrs, Opts).
 
 
 -spec
-fetch_pool_connections(etcp_types:name(), etcp_types:connection_table_type()) ->
-    [] | [{reference(), pid()}].
+fetch_pool_connections(etcp_types:name()) ->
+    [] | [{{reference(), etcp_types:address()}, pid()}].
 %% @doc
 %%      Returns all available pool connections.
 %% @end
-fetch_pool_connections(Pool, ConTabType) when ?is_proc_ref(Pool) andalso
-                                              ?is_table_type(ConTabType) ->
-    etcp_connection_sup:fetch(Pool, ConTabType).
+fetch_pool_connections(Pool) when ?is_proc_ref(Pool) ->
+    etcp_connection_pool:fetch(Pool).
 
 
 -spec
@@ -348,23 +346,7 @@ add_connection(etcp_types:name(), etcp_types:host(), etcp_types:port_number()) -
 add_connection(Pool, Host, Port) when ?is_proc_ref(Pool) andalso
                                      ?is_host(Host) andalso
                                      erlang:is_integer(Port) ->
-    etcp_connection_sup:add(Pool, Host, Port).
-
-
--spec
-add_connections(etcp_types:name()
-               ,etcp_types:host()
-               ,etcp_types:port_number()
-               ,pos_integer()) ->
-    [etcp_types:start_return()].
-%% @doc
-%%      Adds new connections for Host:Port in pool.
-%% @end
-add_connections(Pool, Host, Port, Count) when ?is_proc_ref(Pool) andalso
-                                              ?is_host(Host) andalso
-                                              erlang:is_integer(Port) andalso
-                                              (erlang:is_integer(Count) andalso Count > 0) ->
-    etcp_connection_sup:add(Pool, Host, Port, Count).
+    etcp_connection_pool:add(Pool, Host, Port).
 
 
 -spec
@@ -374,7 +356,7 @@ stop_connection_pool(etcp_types:name()) ->
 %%      stops pool and all connections it has.
 %% @end
 stop_connection_pool(Pool) when ?is_proc_ref(Pool) ->
-    etcp_connection_sup:stop(Pool).
+    etcp_connection_pool:stop(Pool).
 
 
 -spec
@@ -384,7 +366,7 @@ stop_connection_pool(etcp_types:name(), etcp_types:reason()) ->
 %%      stops pool and all connections it has with specific reason.
 %% @end
 stop_connection_pool(Pool, Reason) when ?is_proc_ref(Pool) ->
-    etcp_connection_sup:stop(Pool, Reason).
+    etcp_connection_pool:stop(Pool, Reason).
 
 
 -spec

@@ -33,7 +33,7 @@
 %% @author  Pouriya Jahanbakhsh <pouriya.jahanbakhsh@gmail.com>
 %% @version 17.9.10
 %% -------------------------------------------------------------------------------------------------
--module(etcp_server_sup).
+-module(etcp_server).
 -author("pouriya.jahanbakhsh@gmail.com").
 %% -------------------------------------------------------------------------------------------------
 %% Exports:
@@ -64,7 +64,7 @@
 %% Record & Macros & Includes:
 
 -define(S, state).
--record(?S, {transporter_module, transporter_options, listen_socket, errors}).
+-record(?S, {transporter_module, transporter_state, listen_socket, errors}).
 
 -define(ACCEPTOR_ROOT_SUP, 'etcp_acceptor_root_sup').
 -define(PROCESS_REGISTRY, 'etcp_server_process_registry').
@@ -217,66 +217,71 @@ init({Mod, InitArg, Port, Opts}) ->
                                 ,Opts
                                 ,?DEF_TRANSPORT_MODULE
                                 ,fun erlang:is_atom/1),
-    ProcRegFlag = etcp_utils:get_value(connection_process_regisrty
-                                      ,Opts
-                                      ,?DEF_CONNECTION_PROCESS_REGISTRY
-                                      ,fun erlang:is_boolean/1),
     TrOpts = etcp_utils:get_value(transporter_options
                                  ,Opts
                                  ,?DEF_TRANSPORT_OPTIONS
                                  ,fun(_) -> true end),
-    io:format("ProcReg: ~p~n", [ProcRegFlag]),
-    case etcp_transporter:listen(TrMod, Port, TrOpts) of
-        {ok, LSock} ->
-            OKRet =
-                fun(InitArgX) ->
-                    State = #?S{listen_socket = LSock
-                               ,transporter_module = TrMod
-                               ,transporter_options = TrOpts
-                               ,errors = []},
-                    AccRootSupChildSpec = #{id => ?ACCEPTOR_ROOT_SUP
-                                          ,start => {etcp_acceptor_root_sup
-                                                    ,start_link
-                                                    ,[Mod, InitArgX, Opts, LSock]}},
-                    Children =
-                        if
-                            ProcRegFlag ->
-                                ProcRegChildSpec = #{id => ?PROCESS_REGISTRY
-                                                    ,start => {etcp_server_process_registry
-                                                              ,start_link
-                                                              ,[]}
-                                                    ,type => sup},
-                                [ProcRegChildSpec, AccRootSupChildSpec];
-                            true ->
-                                [AccRootSupChildSpec]
+    case etcp_transporter:init(TrMod, TrOpts) of
+        {ok, TrState} ->
+            ProcRegFlag = etcp_utils:get_value(connection_process_regisrty
+                                              ,Opts
+                                              ,?DEF_CONNECTION_PROCESS_REGISTRY
+                                              ,fun erlang:is_boolean/1),
+            case etcp_transporter:listen(TrMod, Port, TrState) of
+                {ok, {LSock, TrState2}} ->
+                    OKRet =
+                        fun(InitArgX) ->
+                            State = #?S{listen_socket = LSock
+                                       ,transporter_module = TrMod
+                                       ,transporter_state = TrState2
+                                       ,errors = []},
+                            AccRootSupChildSpec = #{id => ?ACCEPTOR_ROOT_SUP
+                                                  ,start => {etcp_acceptor_root_sup
+                                                            ,start_link
+                                                            ,[Mod, InitArgX, Opts, LSock]}},
+                            Children =
+                                if
+                                    ProcRegFlag ->
+                                        ProcRegChildSpec = #{id => ?PROCESS_REGISTRY
+                                                           ,start => {etcp_server_process_registry
+                                                                     ,start_link
+                                                                     ,[]}
+                                                           ,type => sup},
+                                        [ProcRegChildSpec, AccRootSupChildSpec];
+                                    true ->
+                                        [AccRootSupChildSpec]
+                                end,
+                            {ok, State, Children}
                         end,
-                    {ok, State, Children}
-                end,
-            try Mod:listen_init(InitArg, Opts, LSock) of
-                ok ->
-                    OKRet(InitArg);
-                {ok, InitArg2} ->
-                    OKRet(InitArg2);
-                ignore ->
-                    ignore;
-                {stop, _}=Stop ->
-                    Stop;
-                Other ->
-                    {stop, {return, [{value, Other}
-                                    ,{module, Mod}
-                                    ,{function, listen_init}
-                                    ,{arguments, [InitArg, Opts, LSock]}]}}
-            catch
-                _:Rsn ->
-                    {stop, {crash, [{reason, Rsn}
-                                   ,{stacktrace, erlang:get_stacktrace()}
-                                   ,{module, Mod}
-                                   ,{function, listen_init}
-                                   ,{arguments, [InitArg, Opts, LSock]}]}}
+                    try Mod:listen_init(InitArg, Opts, LSock) of
+                        ok ->
+                            OKRet(InitArg);
+                        {ok, InitArg2} ->
+                            OKRet(InitArg2);
+                        ignore ->
+                            ignore;
+                        {stop, _}=Stop ->
+                            Stop;
+                        Other ->
+                            {stop, {return, [{value, Other}
+                                            ,{module, Mod}
+                                            ,{function, listen_init}
+                                            ,{arguments, [InitArg, Opts, LSock]}]}}
+                    catch
+                        _:Rsn ->
+                            {stop, {crash, [{reason, Rsn}
+                                           ,{stacktrace, erlang:get_stacktrace()}
+                                           ,{module, Mod}
+                                           ,{function, listen_init}
+                                           ,{arguments, [InitArg, Opts, LSock]}]}}
+                    end;
+                {error, Rsn} ->
+                    {stop, Rsn}
             end;
         {error, Rsn} ->
             {stop, Rsn}
     end.
+
 
 
 %% @hidden
@@ -300,7 +305,7 @@ handle_exit(_, ChildState, Rsn, #?S{errors = Errs}=State, _) ->
                     end,
                 {State#?S{errors = [Rsn|Errs]}, LogFlag2}
         end,
-    {ok, ChildState, State2, stop, [{log, LogFlag}]}.
+    {stop, ChildState, State2, [{log, LogFlag}]}.
 
 
 %% @hidden
@@ -326,9 +331,9 @@ handle_terminate(_, ChildState, Rsn, #?S{errors = Errs}=State, _) ->
 terminate(Rsn
          ,#?S{listen_socket = LSock
              ,transporter_module = TrMod
-             ,transporter_options = TrOpts
+             ,transporter_state = TrState
              ,errors = Errs}) ->
-    _ = etcp_transporter:close(TrMod, LSock, TrOpts),
+    _ = etcp_transporter:close(TrMod, LSock, TrState),
     Rsn2 =
         case Errs of
             [Rsn3] ->

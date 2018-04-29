@@ -171,7 +171,7 @@ handle_exit(_, ChildState, Rsn, #?S{errors = Errs}=State, _) ->
                     end,
                 {State#?S{errors = [Rsn|Errs]}, LogFlag2}
         end,
-    {ok, ChildState, State2, stop, [{log, LogFlag}]}.
+    {stop, ChildState, State2, [{log, LogFlag}]}.
 
 
 %% @hidden

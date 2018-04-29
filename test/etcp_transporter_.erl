@@ -16,143 +16,136 @@
     Port = etcp_test_utils:choose_port(),
 
     ?print("Opening listening socket", []),
-    {ok, LSock} = Callback:listen(Port, Opts),
-    ?print("Listening socket created, Checking socket activity", []),
-    ?assertEqual(false, get_options(Callback, LSock, Opts, active)),
+    {ok, S} = Callback:init(Opts),
+    {ok, {LSock, SS}} = Callback:listen(Port, S),
+    ?print("Listening socket created", []),
 
     ?print("Creating acceptor process", []),
     AccFun =
         fun() ->
             ?print("Accepting ... ", []),
-            {ok, Sock} = Callback:accept(LSock, Opts),
+            {ok, {Sock, SS2}} = Callback:accept(LSock, SS),
             ?print("Accepted new connection, calling controlling_process", []),
-            ok = Callback:controlling_process(Sock, Self, Opts),
+            {ok, SS3} = Callback:controlling_process(Sock, Self, SS2),
             ?print("Sending socket to controller process", []),
-            Self ! {erlang:self(), Sock},
+            Self ! {erlang:self(), Sock, SS3},
             ?print("Stop accepting", []),
             erlang:exit(normal)
         end,
     Acc = erlang:spawn_link(AccFun),
 
     ?print("Connecting to ~p:~p", [?HOST, Port]),
-    {ok, CSock} = Callback:connect(?HOST, Port, Opts, 3000),
-    ?print("Connected to ~p:~p, Checking socket activity", [?HOST, Port]),
-    ?assertEqual(true, get_options(Callback, CSock, Opts, active)),
+    {ok, {CSock, CS}} = Callback:connect(?HOST, Port, S),
+    ?print("Connected to ~p:~p", [?HOST, Port]),
 
     ?print("Waiting for acceptor", []),
-    SSock =
+    {SSock, SS3} =
         receive
-            {Acc, SSock0} ->
-                ?print("Client socket received from acceptor, Checking socket activity", []),
-                ?assertEqual(false, get_options(Callback, SSock0, Opts, active)),
+            {Acc, SSock0, SS2} ->
+                ?print("Client socket received from acceptor", []),
                 receive
                     {'EXIT', Acc, normal} ->
                         ?print("Acceptor process exited normally", []),
                         ok
                 end,
-                SSock0
+                {SSock0, SS2}
         end,
-
-    ?print("Make server socket active", []),
-    ?assertEqual(ok, Callback:activate(SSock, Opts)),
-    ?assertEqual(true, get_options(Callback, SSock, Opts, active)),
 
     Pkt1 = "foo",
     ?print("Sending packet '~p' through server socket", [Pkt1]),
-    ?assertEqual(ok, Callback:send(SSock, Pkt1, Opts)),
+    {ok, SS4} = Callback:send(SSock, Pkt1, SS3),
     ?print("Packet '~p' has been sent from server socket", [Pkt1]),
 
     ?print("Waiting for receiving '~p' packet from client side", [Pkt1]),
-    Pkt1 =
+    {Pkt1, CS3} =
         receive
             Msg1 ->
                 ?print("Erlang message '~p' received, Checking message using callback module ~p"
                       ,[Msg1, Callback]),
-                Result = Callback:check_message(Msg1, CSock, Opts),
-                ?assertMatch({ok, _}, Result),
-                erlang:element(2, Result)
+                {ok, {Pkt2, CS2}} = Callback:check_message(Msg1, CSock, CS),
+                {Pkt2, CS2}
         end,
     ?print("Packet '~p' received from client", [Pkt1]),
 
-    Pkt2 = "bar",
+    Pkt3 = "bar",
     ?print("Sending packet '~p' through client socket", [Pkt2]),
-    ?assertEqual(ok, Callback:send(CSock, Pkt2, Opts)),
+    {ok, CS4} =  Callback:send(CSock, Pkt3, CS3),
     ?print("Packet '~p' has been sent from client socket", [Pkt2]),
 
     ?print("Waiting for receiving '~p' packet from server side", [Pkt2]),
-    Pkt2 =
+    {Pkt3, SS6} =
         receive
             Msg2 ->
                 ?print("Erlang message '~p' received", [Msg2]),
-                {ok, Pkt2_0} = Callback:check_message(Msg2, SSock, Opts),
-                Pkt2_0
-        end,
-    ?print("Packet '~p' received from server", [Pkt2]),
-
-    ?print("Making server socket inactive", []),
-    ?assertEqual(ok, Callback:set_options(SSock, [{active, false}], Opts)),
-    ?print("Checking server socket activity", []),
-    ?assertEqual(false, get_options(Callback, SSock, Opts, active)),
-
-    ?print("Making client socket inactive", []),
-    ?assertEqual(ok, Callback:set_options(CSock, [{active, false}], Opts)),
-    ?print("Checking client socket activity", []),
-    ?assertEqual(false, get_options(Callback, CSock, Opts, active)),
-
-    Pkt3 = "baz",
-    ?print("Sending packet '~p' through client socket", [Pkt3]),
-    Callback:send(CSock, Pkt3, Opts),
-    ?print("Packet '~p' has been sent from client socket", [Pkt3]),
-
-    ?print("Waiting for receiving '~p' packet from server side", [Pkt3]),
-    Pkt3 =
-        begin
-            Pkt3Head = erlang:hd(Pkt3),
-            {ok, [Pkt3Head]} = Callback:recv(SSock, 1, infinity, Opts),
-            {ok, Pkt3Tail} = Callback:recv(SSock, 0, infinity, Opts),
-            [Pkt3Head|Pkt3Tail]
+                {ok, {Pkt4, SS5}} = Callback:check_message(Msg2, SSock, SS4),
+                {Pkt4, SS5}
         end,
     ?print("Packet '~p' received from server", [Pkt3]),
 
-    Pkt4 = "qux",
-    ?print("Sending packet '~p' through server socket", [Pkt4]),
-    Callback:send(SSock, Pkt4, Opts),
+    ?print("Making server socket inactive", []),
+    {ok, SS7} =  Callback:set_options(SSock, [{active, false}], SS6),
+    ?print("Checking server socket activity", []),
+    {false, SS8} =  get_options(Callback, SSock, SS7, active),
 
-    ?print("Packet '~p' has been sent from server socket", [Pkt4]),
+    ?print("Making client socket inactive", []),
+    {ok, CS5} = Callback:set_options(CSock, [{active, false}], CS4),
+    ?print("Checking client socket activity", []),
+    {false, CS6} = get_options(Callback, CSock, CS5, active),
 
-    ?print("Waiting for receiving '~p' packet from client side", [Pkt4]),
-    Pkt4 =
+    Pkt5 = "baz",
+    ?print("Sending packet '~p' through client socket", [Pkt5]),
+    {ok, CS7} = Callback:send(CSock, Pkt5, CS6),
+    ?print("Packet '~p' has been sent from client socket", [Pkt5]),
+
+    ?print("Waiting for receiving '~p' packet from server side", [Pkt3]),
+    {Pkt5, SS9} =
         begin
-            Pkt4Head = erlang:hd(Pkt4),
-            {ok, [Pkt4Head]} = Callback:recv(CSock, 1, infinity, Opts),
-            {ok, Pkt4Tail} = Callback:recv(CSock, 0, infinity, Opts),
-            [Pkt4Head|Pkt4Tail]
+            Pkt5Head = erlang:hd(Pkt5),
+            {ok, {[Pkt5Head], SS10}} = Callback:recv(SSock, 1, infinity, SS8),
+            {ok, {Pkt5Tail, SS11}} = Callback:recv(SSock, 0, infinity, SS10),
+            {[Pkt5Head|Pkt5Tail], SS11}
         end,
-    ?print("Packet '~p' received from client", [Pkt4]),
+    ?print("Packet '~p' received from server", [Pkt5]),
+
+    Pkt7 = "qux",
+    ?print("Sending packet '~p' through server socket", [Pkt7]),
+    {ok, CS8} = Callback:send(SSock, Pkt7, CS7),
+    ?print("Packet '~p' has been sent from server socket", [Pkt7]),
+
+    ?print("Waiting for receiving '~p' packet from client side", [Pkt7]),
+    {Pkt7, CS9} =
+        begin
+            Pkt7Head = erlang:hd(Pkt7),
+            {ok, {[Pkt7Head], CS10}} = Callback:recv(CSock, 1, infinity, CS8),
+            {ok, {Pkt7Tail, CS11}} = Callback:recv(CSock, 0, infinity, CS10),
+            {[Pkt7Head|Pkt7Tail], CS11}
+        end,
+    ?print("Packet '~p' received from client", [Pkt7]),
 
     ?print("Change client socket to non-blocking mode", []),
-    ?assertEqual(ok, Callback:set_options(CSock, [{active, true}], Opts)),
+    {ok, CS12} = Callback:set_options(CSock, [{active, true}], CS9),
 
     ?print("Closing connection from server", []),
-    ?assertEqual(ok, Callback:close(SSock, Opts)),
+    {ok, _} = Callback:close(SSock, SS9),
 
     ?print("Waiting for receiving event about disconnection from client", []),
     receive
         Msg3 ->
-            ?assertEqual({error, [{reason, closed}]}, Callback:check_message(Msg3, CSock, Opts))
+            ?assertEqual({error, [{reason, closed}]}, Callback:check_message(Msg3, CSock, CS12))
     end,
     ?print("Client connection closed too", []).
 
 
-get_options(Mod, Sock, Opts) ->
-    Result = Mod:get_options(Sock, Opts),
-    ?assertMatch({ok, _}, Result),
-    {_, Result2} = Result,
+get_options(Mod, Sock, S1) ->
+    Result = Mod:get_options(Sock, S1),
+    ?assertMatch({ok, {_, _}}, Result),
+    {_, {Result2, S2}} = Result,
     ?assert(erlang:is_list(Result2)),
-    Result2.
+    {Result2, S2}.
 
 
-get_options(Mod, Sock, Opts, Key) ->
-    Result = lists:keyfind(Key, 1, get_options(Mod, Sock, Opts)),
+get_options(Mod, Sock, S, Key) ->
+    {Result2, S2} = get_options(Mod, Sock, S),
+    Result = lists:keyfind(Key, 1, Result2),
     ?assertMatch({Key, _}, Result),
-    erlang:element(2, Result).
+    {erlang:element(2, Result), S2}.

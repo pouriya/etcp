@@ -70,7 +70,7 @@
             ,module
             ,hibernate
             ,transporter
-            ,transporter_options
+            ,transporter_state
             ,socket
             ,callback
             ,message
@@ -124,9 +124,7 @@ start_link(Mod, InitArg, Host, Port) when erlang:is_atom(Mod) andalso
                          ,InitArg
                          ,Host
                          ,Port
-                         ,?DEF_START_OPTS}]);
-start_link(Mod, InitArg, Opts, Sock) when erlang:is_atom(Mod) andalso erlang:is_map(Opts) ->
-    proc_lib:start(?MODULE, init, [{erlang:self(), Mod, InitArg, Opts, Sock}]).
+                         ,?DEF_START_OPTS}]).
 
 
 -spec
@@ -145,17 +143,9 @@ start_link(Mod, InitArg, Host, Port, Opts) when erlang:is_atom(Mod) andalso
 start_link(Name, Mod, InitArg, Host, Port) when erlang:is_tuple(Name) andalso
                                                 erlang:is_atom(Mod) andalso
                                                 erlang:is_integer(Port) ->
-    gen:start(?MODULE
-             ,link
-             ,Name
-             ,Mod
-             ,{client, InitArg, Host, Port, ?DEF_START_OPTS}
-             ,?DEF_PROC_START_OPTS);
-%% Will called by calling etcp_connection_sup:add/3
-start_link(Mod, InitArg, Opts, LSock, Pool) when erlang:is_atom(Mod) andalso
-                                                 erlang:is_map(Opts) andalso
-                                                 erlang:is_pid(Pool) ->
-    gen:start(?MODULE, link, Mod, {server, InitArg, Opts, LSock, Pool}, ?DEF_PROC_START_OPTS).
+    proc_lib:start_link(?MODULE
+                       ,init
+                       ,[{erlang:self(), Name, Mod, InitArg, Host, Port, ?DEF_START_OPTS}]).
 
 
 -spec
@@ -165,12 +155,20 @@ start_link(etcp_types:register_name()
           , etcp_types:host()
           , etcp_types:port_number()
           , etcp_types:options()) ->
-    etcp_types:start_return().
+    etcp_types:start_return() | {'ok', pid(), etcp_types:transporter_state()}.
 start_link(Name, Mod, InitArg, Host, Port, Opts) when erlang:is_tuple(Name) andalso
                                                       erlang:is_atom(Mod) andalso
                                                       erlang:is_integer(Port) andalso
                                                       erlang:is_map(Opts) ->
-    gen:start(?MODULE, link, Name, Mod, {client, InitArg, Host, Port, Opts}, ?DEF_PROC_START_OPTS).
+    proc_lib:start_link(?MODULE
+                       ,init
+                       ,[{erlang:self(), Name, Mod, InitArg, Host, Port, Opts}]);
+start_link(Mod, InitArg, Opts, TrMod, LSock, TrState) when erlang:is_atom(Mod) andalso
+                                                           erlang:is_map(Opts) andalso
+                                                           erlang:is_atom(TrMod) ->
+    proc_lib:start(?MODULE
+                  ,init
+                  ,[{acceptor, erlang:self(), Mod, InitArg, Opts, TrMod, LSock, TrState}]).
 
 
 -spec
@@ -250,33 +248,29 @@ init({Parent, Name, Mod, InitArg, Host, Port, Opts}) ->
                                          ,Opts
                                          ,?DEF_TRANSPORT_OPTIONS
                                          ,fun erlang:is_list/1),
-            ConTimeout = etcp_utils:get_value(connect_timeout
-                                             ,Opts
-                                             ,?DEF_CONNECT_TIMEOUT
-                                             ,fun etcp_utils:is_timeout/1),
-            case etcp_transporter:connect(TrMod, Host, Port, TrOpts, ConTimeout) of
-                {ok, Sock} ->
-                    DbgOpts = etcp_utils:get_value(connection_debug
-                                                  ,Opts
-                                                  ,?DEF_DEBUG
-                                                  ,fun erlang:is_list/1),
-                    CallErrLogger = etcp_utils:get_value(call_error_logger
-                                                        ,Opts
-                                                        ,?DEF_CALL_ERROR_LOGGER
-                                                        ,fun erlang:is_boolean/1),
-                    Dbg = etcp_utils:debug_options(?MODULE, Name, DbgOpts),
-                    State = #?S{name = Name3
-                               ,module = Mod
-                               ,data = InitArg
-                               ,transporter = TrMod
-                               ,socket = Sock
-                               ,transporter_options = TrOpts
-                               ,error_logger = CallErrLogger
-                               ,hibernate = false
-                               ,timeout = undefined},
-                    MetaData = etcp_metadata:wrap(TrMod, Sock, TrOpts),
-                    case etcp_transporter:activate(TrMod, Sock, TrOpts) of
-                        ok ->
+            case etcp_transporter:init(TrMod, TrOpts) of
+                {ok, TrState} ->
+                    case etcp_transporter:connect(TrMod, Host, Port, TrState) of
+                        {ok, {Sock, TrState2}} ->
+                            DbgOpts = etcp_utils:get_value(connection_debug
+                                                          ,Opts
+                                                          ,?DEF_DEBUG
+                                                          ,fun erlang:is_list/1),
+                            CallErrLogger = etcp_utils:get_value(call_error_logger
+                                                                ,Opts
+                                                                ,?DEF_CALL_ERROR_LOGGER
+                                                                ,fun erlang:is_boolean/1),
+                            Dbg = etcp_utils:debug_options(?MODULE, Name, DbgOpts),
+                            State = #?S{name = Name3
+                                       ,module = Mod
+                                       ,data = InitArg
+                                       ,transporter = TrMod
+                                       ,socket = Sock
+                                       ,transporter_state = TrState2
+                                       ,error_logger = CallErrLogger
+                                       ,hibernate = false
+                                       ,timeout = undefined},
+                            MetaData = etcp_metadata:wrap(TrMod, Sock, TrState2),
                             case run_callback2(Dbg
                                               ,State
                                               ,Mod
@@ -304,7 +298,6 @@ init({Parent, Name, Mod, InitArg, Host, Port, Opts}) ->
                             end;
                         {error, Rsn} ->
                             _ = proc_lib:init_ack(Parent, {error, Rsn}),
-                            _ = etcp_transporter:close(TrMod, Sock, Opts),
                             erlang:exit(Rsn)
                     end;
                 {error, Rsn} ->
@@ -315,40 +308,34 @@ init({Parent, Name, Mod, InitArg, Host, Port, Opts}) ->
             _ = proc_lib:init_ack(Parent, {error, Rsn}),
             erlang:exit(Rsn)
     end;
-init({Parent, Mod, InitArg, Opts, Sock}) ->
+
+init({acceptor, Parent, Mod, InitArg, Opts, TrMod, LSock, TrState}) ->
     Name = erlang:self(),
-    _ = proc_lib:init_ack(Parent, {ok, Name}),
-    TrMod = etcp_utils:get_value(transporter
-                                ,Opts
-                                ,?DEF_TRANSPORT_MODULE
-                                ,fun erlang:is_atom/1),
-    TrOpts = etcp_utils:get_value(transporter_options
-                                ,Opts
-                                ,?DEF_TRANSPORT_OPTIONS
-                                ,fun erlang:is_list/1),
-    DbgOpts = etcp_utils:get_value(connection_debug
-                                  ,Opts
-                                  ,?DEF_DEBUG
-                                  ,fun erlang:is_list/1),
-    CallErrLogger = etcp_utils:get_value(call_error_logger
-                                        ,Opts
-                                        ,?DEF_CALL_ERROR_LOGGER
-                                        ,fun erlang:is_boolean/1),
-    Dbg = etcp_utils:debug_options(?MODULE, Name, DbgOpts),
-    State = #?S{name = Name
-               ,module = Mod
-               ,data = InitArg
-               ,transporter = TrMod
-               ,socket = Sock
-               ,transporter_options = TrOpts
-               ,error_logger = CallErrLogger
-               ,hibernate = false
-               ,timeout = undefined},
-    MetaData = etcp_metadata:wrap(TrMod, Sock, TrOpts),
-    case etcp_transporter:activate(TrMod, Sock, TrOpts) of
-        ok ->
+    case etcp_acceptor:accept(TrMod, LSock, TrState) of
+        {ok, {Sock, TrState2}} ->
+            _ = proc_lib:init_ack(Parent, {ok, Name, TrState2}),
+            DbgOpts = etcp_utils:get_value(connection_debug
+                                          ,Opts
+                                          ,?DEF_DEBUG
+                                          ,fun erlang:is_list/1),
+            CallErrLogger = etcp_utils:get_value(call_error_logger
+                                                ,Opts
+                                                ,?DEF_CALL_ERROR_LOGGER
+                                                ,fun erlang:is_boolean/1),
+            Dbg = etcp_utils:debug_options(?MODULE, Name, DbgOpts),
+            State = #?S{name = Name
+                       ,module = Mod
+                       ,data = InitArg
+                       ,transporter = TrMod
+                       ,socket = Sock
+                       ,transporter_state = TrState2
+                       ,error_logger = CallErrLogger
+                       ,hibernate = false
+                       ,timeout = undefined},
+            MetaData = etcp_metadata:wrap(TrMod, Sock, TrState2),
             case run_callback2(Dbg, State, Mod, connection_init, [InitArg, MetaData]) of
                 {ok, Dbg2, State2} ->
+                    io:format("salaaaaaaaaaaaaaaaaaaaaam"),
                     loop(Parent, Dbg2, State2);
                 {close, _Dbg2, _State2} ->
                     _ = etcp_transporter:close(TrMod, Sock, Opts),
@@ -363,9 +350,9 @@ init({Parent, Mod, InitArg, Opts, Sock}) ->
                     _ = etcp_transporter:close(TrMod, Sock, Opts),
                     erlang:exit(Rsn)
             end;
-        {error, Rsn} ->
-            _ = etcp_transporter:close(TrMod, Sock, Opts),
-            erlang:exit(Rsn)
+        {error, _}=Err ->
+            _ = proc_lib:init_ack(Parent, Err),
+            erlang:exit(normal)
     end.
 
 %% -------------------------------------------------------------------------------------------------
@@ -443,12 +430,12 @@ process_message(Parent
                ,#?S{name = Name
                    ,transporter = TrMod
                    ,socket = Sock
-                   ,transporter_options = TrOpts}=State
-                          ,Msg) ->
-    case etcp_transporter:check_message(TrMod, Msg, Sock, TrOpts) of
-        {ok, Pkt} ->
+                   ,transporter_state = TrState}=State
+               ,Msg) ->
+    case etcp_transporter:check_message(TrMod, Msg, Sock, TrState) of
+        {ok, {Pkt, TrState2}} ->
             {Dbg2, State2} = run_callback(debug(Name, Dbg, {socket_in, Pkt})
-                                         ,State
+                                         ,State#?S{transporter_state = TrState2}
                                          ,handle_packet
                                          ,{Pkt}),
             ?MODULE:loop(Parent, Dbg2, State2);
@@ -467,12 +454,12 @@ process_sync_request(Dbg
                     ,#?S{name = Name
                         ,transporter = TrMod
                         ,socket = Sock
-                        ,transporter_options = TrOpts}=State
+                        ,transporter_state = TrState}=State
                     ,From
                     ,{send, Pkt}) ->
-    case socket_send(TrMod, Sock, Name,  Dbg, Pkt, TrOpts) of
-        {ok, Dbg2} ->
-            {reply(Name, Dbg2, From, ok), State};
+    case socket_send(TrMod, Sock, Name,  Dbg, Pkt, TrState) of
+        {ok, {Dbg2, TrState2}} ->
+            {reply(Name, Dbg2, From, ok), State#?S{transporter_state = TrState2}};
         {error, Rsn}=Err ->
             terminate(reply(Name, Dbg, From, Err), State, Rsn)
     end;
@@ -484,11 +471,11 @@ process_async_request(Dbg
                      ,#?S{name = Name
                          ,transporter = TrMod
                          ,socket = Sock
-                         ,transporter_options = TrOpts}=State
+                         ,transporter_state = TrState}=State
                      ,{send, Pkt}) ->
-    case socket_send(TrMod, Sock, Name,  Dbg, Pkt, TrOpts) of
-        {ok, Dbg2} ->
-            {Dbg2, State};
+    case socket_send(TrMod, Sock, Name,  Dbg, Pkt, TrState) of
+        {ok, {Dbg2, TrState2}} ->
+            {Dbg2, State#?S{transporter_state = TrState2}};
         {error, Rsn} ->
             terminate(Dbg, State, Rsn)
     end;
@@ -509,10 +496,10 @@ run_callback(Dbg
                 ,data= Data
                 ,transporter = TrMod
                 ,socket = Sock
-                ,transporter_options = TrOpts}=State
+                ,transporter_state = TrState}=State
             ,Callback
             ,Args) ->
-    MetaData = etcp_metadata:wrap(TrMod, Sock, TrOpts),
+    MetaData = etcp_metadata:wrap(TrMod, Sock, TrState),
     Args2 =
         case Args of
             {} ->
@@ -582,11 +569,11 @@ get_options(Dbg
            ,#?S{name = Name
                ,transporter = TrMod
                ,socket = Sock
-               ,transporter_options = TrOpts}=State
+               ,transporter_state = TrState}=State
            ,[{packet, Pkt} | Opts]) ->
-    case socket_send(TrMod, Sock, Name, Dbg, Pkt, TrOpts) of
-        {ok, Dbg2} ->
-            get_options(Dbg2, State, Opts);
+    case socket_send(TrMod, Sock, Name, Dbg, Pkt, TrState) of
+        {ok, {Dbg2, TrState2}} ->
+            get_options(Dbg2, State#?S{transporter_state = TrState2}, Opts);
         {error, _}=Err ->
             Err
     end;
@@ -608,8 +595,8 @@ get_options(Dbg
     get_options(Dbg, State#?S{transporter = TrMod}, Opts);
 get_options(Dbg, State, [{socket, Sock} | Opts]) ->
     get_options(Dbg, State#?S{socket = Sock}, Opts);
-get_options(Dbg, State, [{transporter_options, TrOpts} | Opts]) ->
-    get_options(Dbg, State#?S{transporter_options =  TrOpts}, Opts);
+get_options(Dbg, State, [{transporter_state, TrState} | Opts]) ->
+    get_options(Dbg, State#?S{transporter_state = TrState}, Opts);
 %% Catch clauses:
 get_options(_Dbg, _State, [{transporter, TrMod}|_Opts]) ->
     {error, {option_value, [{transporter, TrMod}]}};
@@ -627,10 +614,10 @@ get_options(_Dbg, _State ,Opts) ->
     {error, {options_value, [{options, Opts}]}}.
 
 
-socket_send(TrMod, Sock, Name,  Dbg, Pkt, TrOpts) ->
-    case etcp_transporter:send(TrMod, Sock, Pkt, TrOpts) of
-        ok ->
-            {ok, debug(Name, Dbg, {socket_out, Pkt})};
+socket_send(TrMod, Sock, Name,  Dbg, Pkt, TrState) ->
+    case etcp_transporter:send(TrMod, Sock, Pkt, TrState) of
+        {ok, TrState2} ->
+            {ok, {debug(Name, Dbg, {socket_out, Pkt}), TrState2}};
         {error, _}=Err ->
             Err
     end.
@@ -642,12 +629,12 @@ terminate(Dbg
              ,name = Name
              ,transporter = TrMod
              ,socket = Sock
-             ,transporter_options = TrOpts
+             ,transporter_state = TrState
              ,error_logger = ShouldLog
              ,callback = Func
              ,message = Msg}
          ,Rsn) ->
-    Metadata = etcp_metadata:wrap(TrMod, Sock, TrOpts),
+    Metadata = etcp_metadata:wrap(TrMod, Sock, TrState),
     Rsn2 =
         try Mod:terminate(Rsn, Data, Metadata) of
             {error, Rsn3} ->
@@ -673,7 +660,7 @@ terminate(Dbg
         true ->
             ok
     end,
-    _ = etcp_transporter:close(TrMod, Sock, TrOpts),
+    _ = etcp_transporter:close(TrMod, Sock, TrState),
     sys:print_log(Dbg),
     erlang:exit(Rsn2).
 

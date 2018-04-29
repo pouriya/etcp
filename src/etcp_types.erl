@@ -117,6 +117,8 @@
                                      | {'stop', reason()}
                                      | 'ignore'.
 
+-type transporter_state() :: term().
+
 -export_type([name/0
              ,start_return/0
              ,register_name/0
@@ -143,4 +145,5 @@
              ,listen_init_callback_return/0
              ,transporter_callback_error/0
              ,debug/0
-             ,transporter_options/0]).
+             ,transporter_options/0
+             ,transporter_state/0]).

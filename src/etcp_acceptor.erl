@@ -12,7 +12,8 @@
 -export([start_link/5
         ,mode/1
         ,sleep/1
-        ,accept/1]).
+        ,accept/1
+        ,accept/3]).
 
 -export([init/6
         ,loop/3
@@ -25,6 +26,7 @@
 -define(DEF_DEBUG, []).
 -define(DEF_TRANSPORT_MODULE, 'etcp_transporter_tcp').
 -define(DEF_START_OPTIONS, []).
+-define(DEF_TRANSPORT_OPTIONS, []).
 -define(GEN_CALL_TAG, '$gen_call').
 -define(S, state).
 -record(?S, {module
@@ -34,7 +36,7 @@
             ,mode
             ,process_registry
             ,listen_socket
-            ,transporter_options
+            ,transporter_state
             ,transporter}).
 
 -spec
@@ -59,24 +61,32 @@ accept(Acceptor) when erlang:is_pid(Acceptor) ->
 
 
 init(Parent, Mod, InitArg, Opts, LSock, ProcReg) ->
-    DbgOpts = etcp_utils:get_value(acceptor_debug, Opts, ?DEF_DEBUG, fun erlang:is_list/1),
     TrMod = etcp_utils:get_value(transporter, Opts, ?DEF_TRANSPORT_MODULE, fun erlang:is_atom/1),
-    Mode = etcp_utils:get_value(acceptor_mode, Opts, ?DEF_ACCEPTOR_MODE, fun filter_mode/1),
-    TrOpts = etcp_utils:get_value(acceptor_mode, Opts, ?DEF_ACCEPTOR_MODE, fun(_) -> true end),
-    proc_lib:init_ack(Parent, {ok, erlang:self()}),
-    Name = erlang:self(),
-    Dbg = etcp_utils:debug_options(?MODULE, Name, DbgOpts),
-    Dbg2 = debug(Name, Dbg, {start, TrMod, LSock, ProcReg, Mode}),
-    State = #?S{module = Mod
-               ,init_argument = InitArg
-               ,name = Name
-               ,options = Opts
-               ,mode = Mode
-               ,process_registry = ProcReg
-               ,transporter_options = TrOpts
-               ,transporter = TrMod
-               ,listen_socket = LSock},
-    loop(Parent, Dbg2, State).
+    TrOpts = etcp_utils:get_value(transporter_options, Opts, ?DEF_TRANSPORT_OPTIONS, fun(_) -> true end),
+    case etcp_transporter:init(TrMod, TrOpts) of
+        {ok, TrState} ->
+            DbgOpts = etcp_utils:get_value(acceptor_debug, Opts, ?DEF_DEBUG, fun erlang:is_list/1),
+            TrMod = etcp_utils:get_value(transporter, Opts, ?DEF_TRANSPORT_MODULE, fun erlang:is_atom/1),
+
+            Mode = etcp_utils:get_value(acceptor_mode, Opts, ?DEF_ACCEPTOR_MODE, fun filter_mode/1),
+            proc_lib:init_ack(Parent, {ok, erlang:self()}),
+            Name = erlang:self(),
+            Dbg = etcp_utils:debug_options(?MODULE, Name, DbgOpts),
+            Dbg2 = debug(Name, Dbg, {start, TrMod, LSock, ProcReg, Mode}),
+            State = #?S{module = Mod
+                       ,init_argument = InitArg
+                       ,name = Name
+                       ,options = Opts
+                       ,mode = Mode
+                       ,process_registry = ProcReg
+                       ,transporter_state = TrState
+                       ,transporter = TrMod
+                       ,listen_socket = LSock},
+            loop(Parent, Dbg2, State);
+        {error, Rsn}=Err ->
+            proc_lib:init_ack(Parent, Err),
+            erlang:exit(Rsn)
+    end.
 
 
 loop(Parent
@@ -84,27 +94,24 @@ loop(Parent
     ,#?S{mode = ?ACCEPTOR_ACCEPT_MODE
         ,transporter = TrMod
         ,listen_socket = LSock
-        ,transporter_options = TrOpts
+        ,transporter_state = TrState
         ,options = Opts
         ,name = Name
         ,module = Mod
         ,init_argument = InitArg
         ,process_registry = ProcReg}=State) ->
-    case etcp_transporter:accept(TrMod, LSock, TrOpts) of
-        {ok, Sock} ->
-            Dbg2 = debug(Name, Dbg, {accept, Sock}),
-            {ok, ConPid} = etcp_connection:start_link(Mod, InitArg, Opts, Sock),
-            _ = etcp_transporter:controlling_process(TrMod, Sock, ConPid, TrOpts),
-            Dbg3 = debug(Name, Dbg2, {start_connection, Sock, ConPid}),
-            Dbg4 =
+    try etcp_connection:start_link(Mod, InitArg, Opts, TrMod, LSock, TrState) of
+        {ok, Pid, TrState2} ->
+            Dbg2 = debug(Name, Dbg, {start_connection, Pid}),
+            Dbg3 =
                 if
                     erlang:is_pid(ProcReg) ->
-                        etcp_server_process_registry:new(ProcReg, ConPid),
-                        debug(Name, Dbg3, {process_registry, Sock, ConPid, ProcReg});
+                        etcp_server_process_registry:new(ProcReg, Pid),
+                        debug(Name, Dbg2, {process_registry, Pid, ProcReg});
                     true ->
-                        Dbg3
+                        Dbg2
                 end,
-            process_message(Parent, Dbg4, State);
+            process_message(Parent, Dbg3, State#?S{transporter_state = TrState2});
         {error, {socket_accept, [{reason, timeout}|_]}} ->
             process_message(Parent, Dbg, State);
         {error, {socket_accept, [{reason, emfile}|_]}} ->
@@ -112,6 +119,12 @@ loop(Parent
             process_message(Parent, Dbg, State);
         {error, Rsn} ->
             terminate(Dbg, State, Rsn)
+    catch
+        _:Rsn ->
+            error_logger:warning_msg("ETCP acceptor ~p: could not start new process for reason ~p"
+                                    ,[Name, Rsn]),
+            timer:sleep(100),
+            process_message(Parent, Dbg, State)
     end;
 loop(Parent, Dbg, State) ->
     process_message(Parent, Dbg, State).
@@ -168,3 +181,7 @@ reply(Name, Dbg, {Pid, Tag}=Client, Msg) ->
 reply(Name, Dbg, Pid, Msg) ->
     catch Pid ! Msg,
     debug(Name, Dbg, {out, Pid, Msg}).
+
+
+accept(TrMod, LSock, TrState) ->
+    etcp_transporter:accept(TrMod, LSock, TrState).

@@ -41,9 +41,10 @@
 %% Exports:
 
 %% API:
--export([listen/2
+-export([init/1
+        ,listen/2
         ,accept/2
-        ,connect/4
+        ,connect/3
         ,send/3
         ,recv/4
         ,check_message/3
@@ -59,6 +60,10 @@
 %% -------------------------------------------------------------------------------------------------
 %% Records & Macros & Includes:
 
+-define(S, state).
+-record(?S, {options % gen_tcp options
+            ,metadata}).
+
 -define(DEF_ACCEPTOR_ACCEPT_TIMEOUT, 3000).
 -define(DEF_ACCEPTOR_HANDSHAKE_TIMEOUT, 3000).
 -define(DEF_SOCKET_OPTIONS, []).
@@ -68,77 +73,127 @@
 %% API:
 
 -spec
-listen(etcp_types:port_number(), etcp_types:transporter_options()) ->
-    {'ok', etcp_types:socket()} | etcp_types:transporter_callback_error().
-listen(Port, Opts) when erlang:is_list(Opts) ->
-    case ssl:listen(Port, [{active, false} | filter_options(Opts, [])]) of
-        {ok, _}=Ok ->
-            Ok;
+init(etcp_types:transporter_options()) ->
+    {'ok', etcp_types:transporter_state()} | etcp_types:transporter_callback_error().
+init(Opts) when erlang:is_list(Opts) ->
+    try {etcp_utils:get_value(connect_timeout
+                             ,Opts
+                             ,?DEF_CONNECT_TIMEOUT
+                             ,fun etcp_utils:is_timeout/1)
+        ,etcp_utils:get_value(accept_timeout
+                             ,Opts
+                             ,?DEF_ACCEPTOR_ACCEPT_TIMEOUT
+                             ,fun etcp_utils:is_timeout/1)
+        ,etcp_utils:get_value(handshake_timeout
+                             ,Opts
+                             ,?DEF_ACCEPTOR_HANDSHAKE_TIMEOUT
+                             ,fun etcp_utils:is_timeout/1)} of
+        {ConnectTimeout, AcceptTimeout, HandshakeTimeout} ->
+            {ok, #?S{options = Opts -- [{connect_timeout, ConnectTimeout}
+                                       ,{accept_timeout, AcceptTimeout}
+                                       ,{handshake_timeout, HandshakeTimeout}]
+                    ,metadata = #{accept_timeout => AcceptTimeout
+                                 ,connect_timeout => ConnectTimeout
+                                 ,handshake_timeout => HandshakeTimeout}}}
+    catch
+        _:{_, Rsn} when erlang:is_list(Rsn) ->
+            {error, Rsn};
+        _:Rsn ->
+            {error, [{reason, Rsn}]}
+    end.
+
+
+-spec
+listen(etcp_types:port_number(), etcp_types:transporter_state()) ->
+    {'ok', {etcp_types:socket(), etcp_types:transporter_state()}} |
+    etcp_types:transporter_callback_error().
+listen(Port, #?S{options = Opts}=S) ->
+    case ssl:listen(Port, filter_options(Opts, [])) of
+        {ok, Sock} ->
+            {ok, {Sock, S#?S{metadata = maps:remove(connect_timeout, S#?S.metadata)}}};
         {error, Rsn} ->
             {error, [{reason, Rsn}]}
     end.
 
 
 -spec
-accept(etcp_types:socket(), etcp_types:transporter_options()) ->
-    {ok, etcp_types:socket()} | etcp_types:transporter_callback_error().
-accept(LSock, _) ->
-    case ssl:transport_accept(LSock, ?DEF_ACCEPTOR_ACCEPT_TIMEOUT) of
-        {ok, Sock}=Ok ->
-            case ssl:ssl_accept(Sock, ?DEF_ACCEPTOR_ACCEPT_TIMEOUT) of
+accept(etcp_types:socket(), etcp_types:transporter_state()) ->
+    {ok, {etcp_types:socket(), etcp_types:transporter_state()}} |
+    etcp_types:transporter_callback_error().
+accept(LSock, #?S{metadata = Metadata}=S) ->
+    case ssl:transport_accept(LSock
+                             ,maps:get(accept_timeout, Metadata, ?DEF_ACCEPTOR_ACCEPT_TIMEOUT)) of
+        {ok, Sock} ->
+            case ssl:ssl_accept(Sock
+                               ,maps:get(handshake_timeout
+                                        ,Metadata
+                                        ,?DEF_ACCEPTOR_HANDSHAKE_TIMEOUT)) of
                 ok ->
-                    Ok;
+                    {ok, {Sock, S}};
                 {error, Rsn} ->
                     {error, [{reason, Rsn}
-                            ,{accept_timeout, ?DEF_ACCEPTOR_ACCEPT_TIMEOUT}
-                            ,{handshake_timeout, ?DEF_ACCEPTOR_ACCEPT_TIMEOUT}]}
+                            ,{accept_timeout, maps:get(accept_timeout
+                                                      ,Metadata
+                                                      ,?DEF_ACCEPTOR_ACCEPT_TIMEOUT)}
+                            ,{handshake_timeout, maps:get(handshake_timeout
+                                                         ,Metadata
+                                                         ,?DEF_ACCEPTOR_HANDSHAKE_TIMEOUT)}]}
             end;
         {error, Rsn} ->
-            {error, [{reason, Rsn}, {accept_timeout, ?DEF_ACCEPTOR_ACCEPT_TIMEOUT}]}
+            {error, [{reason, Rsn}, {accept_timeout, maps:get(accept_timeout
+                                                             ,Metadata
+                                                             ,?DEF_ACCEPTOR_ACCEPT_TIMEOUT)}]}
     end.
 
 
 -spec
-connect(etcp_types:host(), etcp_types:port_number(), etcp_types:transporter_options(), timeout()) ->
-    {'ok', etcp_types:socket()} | etcp_types:transporter_callback_error().
-connect(Host, Port, Opts, ConnectTimeout) ->
-    case ssl:connect(Host, Port, [{active, true} | filter_options(Opts, [])], ConnectTimeout) of
-        {ok, _}=Ok ->
-            Ok;
+connect(etcp_types:host(), etcp_types:port_number(), etcp_types:transporter_state()) ->
+    {'ok', {etcp_types:socket(), etcp_types:transporter_state()}} |
+    etcp_types:transporter_callback_error().
+connect(Host, Port, #?S{options = Opts, metadata = Metadata}=S) ->
+    case ssl:connect(Host
+                    ,Port
+                    ,filter_options(Opts, [])
+                    ,maps:get(connect_timeout, Metadata, ?DEF_CONNECT_TIMEOUT)) of
+        {ok, Sock} ->
+            {ok, {Sock, S#?S{metadata = maps:remove(handshake_timeout, maps:remove(accept_timeout, Metadata))}}};
         {error, Rsn} ->
             {error, [{reason, Rsn}]}
     end.
 
 
 -spec
-send(etcp_types:socket(), etcp_types:packet(), etcp_types:transporter_options()) ->
-    'ok' | etcp_types:transporter_callback_error().
-send(Sock, Pkt, _) ->
+send(etcp_types:socket(), etcp_types:packet(), etcp_types:transporter_state()) ->
+    {'ok', etcp_types:transporter_state()} | etcp_types:transporter_callback_error().
+send(Sock, Pkt, S) ->
     case ssl:send(Sock, Pkt) of
         ok ->
-            ok;
+            {ok, S};
         {error, Rsn} ->
             {error, [{reason, Rsn}]}
     end.
 
 
 -spec
-recv(etcp_types:socket(), etcp_types:length(), timeout(), etcp_types:transporter_options()) ->
-    {ok, etcp_types:packet()} | etcp_types:transporter_callback_error().
-recv(Sock, Len, Timeout, _Opts) ->
+recv(etcp_types:socket(), etcp_types:length(), timeout(), etcp_types:transporter_state()) ->
+    {'ok', {etcp_types:packet(), etcp_types:transporter_state()}} |
+    etcp_types:transporter_callback_error().
+recv(Sock, Len, Timeout, S) ->
     case ssl:recv(Sock, Len, Timeout) of
-        {ok, _}=Ok ->
-            Ok;
+        {ok, Pkt} ->
+            {ok, {Pkt, S}};
         {error, Rsn} ->
             {error, [{reason, Rsn}]}
     end.
 
 
 -spec
-check_message(any(),etcp_types:socket(), etcp_types:transporter_options()) ->
-    {'ok', etcp_types:packet()} | etcp_types:transporter_callback_error() | 'unknown'.
-check_message({ssl, Sock, Pkt}, Sock, _) ->
-    {ok, Pkt};
+check_message(any(), etcp_types:socket(), etcp_types:transporter_state()) ->
+    {'ok', {etcp_types:packet(), etcp_types:transporter_state()}} |
+    etcp_types:transporter_callback_error()                       |
+    'unknown'.
+check_message({ssl, Sock, Pkt}, Sock, S) ->
+    {ok, {Pkt, S}};
 check_message({ssl_closed, Sock}, Sock, _) ->
     {error, [{reason, closed}]};
 check_message({ssl_error, Sock, Rsn}, Sock, _) ->
@@ -148,81 +203,78 @@ check_message(_, _, _) ->
 
 
 -spec
-close(etcp_types:socket(), etcp_types:transporter_options()) ->
-    'ok' | etcp_types:transporter_callback_error().
-close(Sock, _Opts) ->
-    case ssl:close(Sock) of
-        ok ->
-            ok;
-        {error, Rsn} ->
-            {error, [{reason, Rsn}]}
-    end.
+close(etcp_types:socket(), etcp_types:transporter_state()) ->
+    {'ok', etcp_types:transporter_state()} | etcp_types:transporter_callback_error().
+close(Sock, S) ->
+    ssl:close(Sock),
+    {ok, S}.
 
 
 -spec
-shutdown(etcp_types:socket(), etcp_types:shutdown_type(), etcp_types:transporter_options()) ->
-    'ok' | etcp_types:transporter_callback_error().
-shutdown(Sock, Type, _Opts) ->
+shutdown(etcp_types:socket(), etcp_types:shutdown_type(), etcp_types:transporter_state()) ->
+    {'ok', etcp_types:transporter_state()} | etcp_types:transporter_callback_error().
+shutdown(Sock, Type, S) ->
     case ssl:shutdown(Sock, Type) of
         ok ->
-            ok;
+            {ok, S};
         {error, Rsn} ->
             {error, [{reason, Rsn}]}
     end.
 
 
 -spec
-controlling_process(etcp_types:socket(), pid(), etcp_types:transporter_options()) ->
-    'ok' | etcp_types:transporter_callback_error().
-controlling_process(Sock, Pid, _Opts) ->
+controlling_process(etcp_types:socket(), pid(), etcp_types:transporter_state()) ->
+    {'ok', etcp_types:transporter_state()} | etcp_types:transporter_callback_error().
+controlling_process(Sock, Pid, S) ->
     case ssl:controlling_process(Sock, Pid) of
         ok ->
-            ok;
+            {ok, S};
         {error, Rsn} ->
             {error, [{reason, Rsn}]}
     end.
 
 
 -spec
-activate(etcp_types:socket(), etcp_types:transporter_options()) ->
-    ok | etcp_types:transporter_callback_error().
-activate(Sock, _) ->
+activate(etcp_types:socket(), etcp_types:transporter_state()) ->
+    {'ok', etcp_types:transporter_state()} | etcp_types:transporter_callback_error().
+activate(Sock, S) ->
     case ssl:setopts(Sock, [{active, true}]) of
         ok ->
-            ok;
+            {ok, S};
         {error, Rsn} ->
             {error, [{reason, Rsn}]}
     end.
 
 
 -spec
-set_options(etcp_types:socket(), list(), etcp_types:transporter_options()) ->
-    'ok' | etcp_types:transporter_callback_error().
-set_options(Sock, SockOpts, _Opts) ->
+set_options(etcp_types:socket(), list(), etcp_types:transporter_state()) ->
+    {'ok', etcp_types:transporter_state()} | etcp_types:transporter_callback_error().
+set_options(Sock, SockOpts, S) ->
     case ssl:setopts(Sock, SockOpts) of
         ok ->
-            ok;
+            {ok, S};
         {error, Rsn} ->
             {error, [{reason, Rsn}]}
     end.
 
 
 -spec
-peername(etcp_types:socket(), etcp_types:transporter_options()) ->
-    {'ok', etcp_types:address()} | etcp_types:transporter_callback_error().
-peername(Sock, _Opts) ->
+peername(etcp_types:socket(), etcp_types:transporter_state()) ->
+    {'ok', {etcp_types:address(), etcp_types:transporter_state()}} |
+    etcp_types:transporter_callback_error().
+peername(Sock, S) ->
     case ssl:peername(Sock) of
-        {ok, _}=Ok ->
-            Ok;
+        {ok, PN} ->
+            {ok, {PN, S}};
         {error, Rsn} ->
             {error, [{reason, Rsn}]}
     end.
 
 
 -spec
-get_options(etcp_types:socket(), etcp_types:transporter_options()) ->
-    {'ok', list()} | etcp_types:transporter_callback_error().
-get_options(Sock, _Opts) ->
+get_options(etcp_types:socket(), etcp_types:transporter_state()) ->
+    {'ok', {term(), etcp_types:transporter_state()}} | etcp_types:transporter_callback_error().
+get_options(Sock, S) ->
     case ssl:getopts(Sock
                     ,[active
                      ,buffer
@@ -248,10 +300,10 @@ get_options(Sock, _Opts) ->
                      ,send_timeout_close
                      ,show_econnreset
                      ,sndbuf
-%%                     ,ipv6_v6only %% Generates stupid error :-S
+%%                     ,ipv6_v6only %% Generates f**king error :-S
                      ,tos]) of
-        {ok, _}=Ok ->
-            Ok;
+        {ok, Opts} ->
+            {ok, {Opts, S}};
         {error, Rsn} ->
             {error, [{reason, Rsn}]}
     end.

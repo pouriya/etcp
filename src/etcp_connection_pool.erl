@@ -34,7 +34,7 @@
 %% @version 17.9.10
 %% @hidden
 %% -------------------------------------------------------------------------------------------------
--module(etcp_connection_sup).
+-module(etcp_connection_pool).
 -author("pouriya.jahanbakhsh@gmail.com").
 %% -------------------------------------------------------------------------------------------------
 %% Exports:
@@ -217,7 +217,7 @@ handle_exit(Id, ChildState, Rsn, #?S{module = Mod}=State, _) ->
                                             ,{function, handle_exit}
                                             ,{arguments, [Rsn, Id, ChildState]}]}}}
         end,
-    {ok, ChildState2, State, Action, [{log, false}]}.
+    {Action, ChildState2, State, [{log, false}]}.
 
 
 %% @hidden

@@ -7,10 +7,10 @@
             ,etcp_acceptor_root_sup
             ,etcp_acceptor_sup
             ,etcp_connection
-            ,etcp_connection_sup
+            , etcp_connection_pool
             ,etcp_metadata
             ,etcp_server_connection_sup
-            ,etcp_server_sup
+            , etcp_server
             ,etcp_transporter
             ,etcp_transporter_ssl
             ,etcp_transporter_tcp

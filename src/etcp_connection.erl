@@ -335,7 +335,6 @@ init({acceptor, Parent, Mod, InitArg, Opts, TrMod, LSock, TrState}) ->
             MetaData = etcp_metadata:wrap(TrMod, Sock, TrState2),
             case run_callback2(Dbg, State, Mod, connection_init, [InitArg, MetaData]) of
                 {ok, Dbg2, State2} ->
-                    io:format("salaaaaaaaaaaaaaaaaaaaaam"),
                     loop(Parent, Dbg2, State2);
                 {close, _Dbg2, _State2} ->
                     _ = etcp_transporter:close(TrMod, Sock, Opts),

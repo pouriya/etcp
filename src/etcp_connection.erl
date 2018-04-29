@@ -115,7 +115,7 @@ start_link(module(), term(), etcp_types:host(), etcp_types:port_number()) ->
 %%      starts and links a socket connection handler process.
 %% @end
 start_link(Mod, InitArg, Host, Port) when erlang:is_atom(Mod) andalso
-                                          erlang:is_integer(Port) ->
+    erlang:is_integer(Port) ->
     proc_lib:start_link(?MODULE
                        ,init
                        ,[{erlang:self()
@@ -135,14 +135,14 @@ start_link(module() | etcp_types:register_name()
           ,etcp_types:options() | etcp_types:port_number()) ->
     etcp_types:start_return().
 start_link(Mod, InitArg, Host, Port, Opts) when erlang:is_atom(Mod) andalso
-                                                erlang:is_integer(Port) andalso
-                                                erlang:is_map(Opts) ->
+    erlang:is_integer(Port) andalso
+    erlang:is_map(Opts) ->
     proc_lib:start_link(?MODULE
                        ,init
                        ,[{erlang:self(), erlang:self(), Mod, InitArg, Host, Port, Opts}]);
 start_link(Name, Mod, InitArg, Host, Port) when erlang:is_tuple(Name) andalso
-                                                erlang:is_atom(Mod) andalso
-                                                erlang:is_integer(Port) ->
+    erlang:is_atom(Mod) andalso
+    erlang:is_integer(Port) ->
     proc_lib:start_link(?MODULE
                        ,init
                        ,[{erlang:self(), Name, Mod, InitArg, Host, Port, ?DEF_START_OPTS}]).
@@ -157,15 +157,15 @@ start_link(etcp_types:register_name()
           , etcp_types:options()) ->
     etcp_types:start_return() | {'ok', pid(), etcp_types:transporter_state()}.
 start_link(Name, Mod, InitArg, Host, Port, Opts) when erlang:is_tuple(Name) andalso
-                                                      erlang:is_atom(Mod) andalso
-                                                      erlang:is_integer(Port) andalso
-                                                      erlang:is_map(Opts) ->
+    erlang:is_atom(Mod) andalso
+    erlang:is_integer(Port) andalso
+    erlang:is_map(Opts) ->
     proc_lib:start_link(?MODULE
                        ,init
                        ,[{erlang:self(), Name, Mod, InitArg, Host, Port, Opts}]);
 start_link(Mod, InitArg, Opts, TrMod, LSock, TrState) when erlang:is_atom(Mod) andalso
-                                                           erlang:is_map(Opts) andalso
-                                                           erlang:is_atom(TrMod) ->
+    erlang:is_map(Opts) andalso
+    erlang:is_atom(TrMod) ->
     proc_lib:start(?MODULE
                   ,init
                   ,[{acceptor, erlang:self(), Mod, InitArg, Opts, TrMod, LSock, TrState}]).
@@ -223,9 +223,9 @@ stop(Con, Reason) when ?is_proc_ref(Con) ->
 
 -spec
 stop(etcp_types:name(), etcp_type:reason(), timeout()) ->
-  ok.
+    ok.
 stop(Con, Reason, Timeout) when ?is_proc_ref(Con) andalso ?is_timeout(Timeout) ->
-  proc_lib:stop(Con, Reason, Timeout).
+    proc_lib:stop(Con, Reason, Timeout).
 
 %% -------------------------------------------------------------------------------------------------
 %% 'gen' callback:
@@ -287,11 +287,11 @@ init({Parent, Name, Mod, InitArg, Host, Port, Opts}) ->
                                     _ = proc_lib:init_ack(Parent, {error, Rsn}),
                                     _ = etcp_transporter:close(TrMod, Sock, Opts),
                                     erlang:exit(Rsn);
-                                {error, {return, [{value, ignore}|_]}} ->
+                                {error, _, _, {return, [{value, ignore}|_]}} ->
                                     _ = proc_lib:init_ack(Parent, ignore),
                                     _ = etcp_transporter:close(TrMod, Sock, Opts),
                                     erlang:exit(normal);
-                                {error, Rsn} ->
+                                {error, _, _, Rsn} ->
                                     _ = proc_lib:init_ack(Parent, {error, Rsn}),
                                     _ = etcp_transporter:close(TrMod, Sock, Opts),
                                     erlang:exit(Rsn)
@@ -342,10 +342,10 @@ init({acceptor, Parent, Mod, InitArg, Opts, TrMod, LSock, TrState}) ->
                 {stop, _, _, Rsn} ->
                     _ = etcp_transporter:close(TrMod, Sock, Opts),
                     erlang:exit(Rsn);
-                {error, {return, [{value, ignore}|_]}} ->
+                {error, _, _, {return, [{value, ignore}|_]}} ->
                     _ = etcp_transporter:close(TrMod, Sock, Opts),
                     erlang:exit(normal);
-                {error, Rsn} ->
+                {error, _, _, Rsn} ->
                     _ = etcp_transporter:close(TrMod, Sock, Opts),
                     erlang:exit(Rsn)
             end;
@@ -515,8 +515,8 @@ run_callback(Dbg
             terminate(Dbg2, State2, normal);
         {stop, Dbg2, State2, Reason} ->
             terminate(Dbg2, State2, Reason);
-        {error, Reason} ->
-            terminate(Dbg, State, Reason)
+        {error, Dbg2, State2, Reason} ->
+            terminate(Dbg2, State2, Reason)
     end.
 
 
@@ -533,7 +533,7 @@ run_callback2(Dbg, State, Mod, Func, Args) ->
                 case get_options(Dbg, State, Opts) of
                     {ok, Dbg2, State2}  ->
                         {close, Dbg2, State2#?S{callback = Func}};
-                    {error, _}=Err ->
+                    {error, _, _, _}=Err ->
                         Err
                 end;
             {stop, Rsn} ->
@@ -542,18 +542,18 @@ run_callback2(Dbg, State, Mod, Func, Args) ->
                 case get_options(Dbg, State, Opts) of
                     {ok, Dbg2, State2}  ->
                         {stop, Dbg2, State2#?S{callback = Func}, Rsn};
-                    {error, _}=Err ->
+                    {error, _, _, _}=Err ->
                         Err
                 end;
             Other ->
-                {error, {return, [{value, Other}]}}
+                {error, Dbg, State#?S{callback = Func}, {return, [{value, Other}]}}
         catch
             _:Rsn ->
-                {error, {crash, [{reason, Rsn}, {stacktrace, erlang:get_stacktrace()}]}}
+                {error, Dbg, State#?S{callback = Func}, {crash, [{reason, Rsn}, {stacktrace, erlang:get_stacktrace()}]}}
         end,
     case Ret of
-        {error, {Rsn2, ErrParams}} ->
-            {error, {Rsn2, ErrParams ++ [{module, Mod}, {function, Func}, {arguments, Args}]}};
+        {error, Dbg3, State3, {Rsn2, ErrParams}} ->
+            {error, Dbg3, State3, {Rsn2, ErrParams ++ [{module, Mod}, {function, Func}, {arguments, Args}]}};
         _ ->
             Ret
     end.
@@ -573,16 +573,16 @@ get_options(Dbg
     case socket_send(TrMod, Sock, Name, Dbg, Pkt, TrState) of
         {ok, {Dbg2, TrState2}} ->
             get_options(Dbg2, State#?S{transporter_state = TrState2}, Opts);
-        {error, _}=Err ->
-            Err
+        {error, Rsn} ->
+            {error, Dbg, State, Rsn}
     end;
 get_options(Dbg, #?S{name = Name}=State, [{reply, {To, Msg}}|Opts]) ->
     get_options(reply(Name, Dbg, To, Msg), State, Opts);
 get_options(Dbg, State, [{timeout, Timeout}|Opts]) when (erlang:is_integer(Timeout) andalso
-                                                         Timeout >= 0 andalso
-                                                         % max value for 'receive' statement
-                                                         Timeout =< 4294967295) orelse
-                                                        Timeout =:= infinity ->
+    Timeout >= 0 andalso
+    % max value for 'receive' statement
+Timeout =< 4294967295) orelse
+    Timeout =:= infinity ->
     get_options(Dbg, State#?S{timeout = Timeout}, Opts);
 get_options(Dbg, State, [{hibernate, HibernateFlag}|Opts]) when erlang:is_boolean(HibernateFlag) ->
     get_options(Dbg, State#?S{hibernate = HibernateFlag}, Opts);
@@ -597,20 +597,20 @@ get_options(Dbg, State, [{socket, Sock} | Opts]) ->
 get_options(Dbg, State, [{transporter_state, TrState} | Opts]) ->
     get_options(Dbg, State#?S{transporter_state = TrState}, Opts);
 %% Catch clauses:
-get_options(_Dbg, _State, [{transporter, TrMod}|_Opts]) ->
-    {error, {option_value, [{transporter, TrMod}]}};
-get_options(_Dbg, _State, [{timeout, Timeout}|_Opts]) ->
-    {error, {option_value, [{timeout, Timeout}]}};
-get_options(_Dbg, _State, [{reply, To_Msg}|_Opts]) ->
-    {error, {option_value, [{reply, To_Msg}]}};
-get_options(_Dbg, _State, [{hibernate, HibernateFlag}|_Opts]) ->
-    {error, {option_value, [{hibernate, HibernateFlag}]}};
-get_options(_Dbg, _State, [{Key, Val}|_Opts]) ->
-    {error, {option_value, [{key, Key}, {value, Val}]}};
-get_options(_Dbg, _State, [Opt|_Opts]) ->
-    {error, {option_value, [{option, Opt}]}};
-get_options(_Dbg, _State ,Opts) ->
-    {error, {options_value, [{options, Opts}]}}.
+get_options(Dbg, State, [{transporter, TrMod}|_Opts]) ->
+    {error, Dbg, State, {option_value, [{transporter, TrMod}]}};
+get_options(Dbg, State, [{timeout, Timeout}|_Opts]) ->
+    {error, Dbg, State, {option_value, [{timeout, Timeout}]}};
+get_options(Dbg, State, [{reply, To_Msg}|_Opts]) ->
+    {error, Dbg, State, {option_value, [{reply, To_Msg}]}};
+get_options(Dbg, State, [{hibernate, HibernateFlag}|_Opts]) ->
+    {error, Dbg, State, {option_value, [{hibernate, HibernateFlag}]}};
+get_options(Dbg, State, [{Key, Val}|_Opts]) ->
+    {error, Dbg, State, {option_value, [{key, Key}, {value, Val}]}};
+get_options(Dbg, State, [Opt|_Opts]) ->
+    {error, Dbg, State, {option_value, [{option, Opt}]}};
+get_options(Dbg, State ,Opts) ->
+    {error, Dbg, State, {options_value, [{options, Opts}]}}.
 
 
 socket_send(TrMod, Sock, Name,  Dbg, Pkt, TrState) ->
@@ -651,10 +651,10 @@ terminate(Dbg
     if
         ShouldLog ->
             error_logger:format("** ETCP connection ~p terminating \n"
-                                "** Reason for termination == ~p\n"
-                                "** Last callback == ~p\n"
-                                "** Last message == ~p\n"
-                                "** State == ~p\n"
+            "** Reason for termination == ~p\n"
+            "** Last callback == ~p\n"
+            "** Last message == ~p\n"
+            "** State == ~p\n"
                                ,[Name, Rsn2, Func, Msg, Data]);
         true ->
             ok
@@ -693,7 +693,7 @@ handle_debug(IODev, {?GEN_EVENT_TAG, Event}, Name) ->
 handle_debug(IODev, {?GEN_ETCP_TAG, {Pid, Tag}, {send, Pkt}}, Name) ->
     io:format(IODev
              ,"*DBG* ETCP connection ~p got synchronous request for sending packet ~p from ~p with t"
-              "ag ~p\n"
+        "ag ~p\n"
              ,[Name, Pkt, Pid, Tag]);
 handle_debug(IODev, {?GEN_ETCP_TAG, {send, Pkt}}, Name) ->
     io:format(IODev

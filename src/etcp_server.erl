@@ -42,14 +42,11 @@
 -export([start_link/3
         ,start_link/4
         ,start_link/5
-
         ,connections/1
         ,acceptors/1
-
-        ,sleep/1
-        ,accept/1
+        ,suspend/1
+        ,resume/1
         ,modes/1
-
         ,stop/1
         ,stop/2]).
 
@@ -60,21 +57,23 @@
         ,handle_terminate/5
         ,terminate/2]).
 
+%% 'etcp_config' callback:
+-export([filter_connection_keeper/1]).
+
 %% -------------------------------------------------------------------------------------------------
 %% Record & Macros & Includes:
 
 -define(S, state).
--record(?S, {transporter_module, transporter_state, listen_socket, errors}).
+-record(?S, {transporter_state}).
 
--define(ACCEPTOR_ROOT_SUP, 'etcp_acceptor_root_sup').
--define(PROCESS_REGISTRY, 'etcp_server_process_registry').
+-define(ACCEPTOR_ROOT_SUP, 'etcp_acceptor_sup').
+-define(PROCESS_KEEPER, 'process_keeper').
 -define(DEF_DIRECTOR_START_OPTS, []).
 -define(DEF_START_OPTS, #{}).
 -define(DEF_ACCEPTOR_COUNT, 10).
--define(DEF_TRANSPORT_OPTIONS, []).
--define(DEF_TERMINATE_TIMEOUT, 'infinity').
--define(DEF_TRANSPORT_MODULE, 'etcp_transporter_tcp').
--define(DEF_CONNECTION_PROCESS_REGISTRY, 'true').
+-define(DEF_TRANSPORTER_OPTIONS, []).
+-define(DEF_TRANSPORTER, 'tcp').
+-define(DEF_CONNECTION_PROCESS_KEEPER, {'child', {etcp_server_process_keeper}}).
 
 -include("internal/etcp_guard.hrl").
 
@@ -82,37 +81,36 @@
 %% API functions:
 
 -spec
-start_link(module(), etcp_types:init_argument(), etcp_types:port_number()) ->
-     etcp_types:start_return().
-start_link(Mod, InitArg, Port) when erlang:is_atom(Mod),
-                                    erlang:is_integer(Port) ->
+start_link(module(), etcp:init_argument(), etcp:port_number()) ->
+     etcp:start_return().
+start_link(Mod, InitArg, Port) when erlang:is_atom(Mod) andalso erlang:is_integer(Port) ->
     start_link(Mod, InitArg, Port, ?DEF_START_OPTS).
 
 
 -spec
-start_link(etcp_types:register_name() | module()
-          ,module() | etcp_types:init_argument()
-          ,etcp_types:init_argument() | etcp_types:port_number()
-          ,etcp_types:port_number() | etcp_types:start_options()) ->
-    etcp_types:start_return().
-start_link(Mod, InitArg, Port, Opts) when erlang:is_atom(Mod),
-                                          erlang:is_integer(Port),
-                                          erlang:is_map(Opts) ->
+start_link(etcp:register_name() | module()
+          ,module()             | etcp:init_argument()
+          ,etcp:init_argument() | etcp:port_number()
+          ,etcp:port_number()   | etcp:start_options()) ->
+    etcp:start_return().
+start_link(Mod, InitArg, Port, Opts) when erlang:is_atom(Mod)     andalso
+                                          erlang:is_integer(Port) andalso
+                                          erlang:is_map(Opts)          ->
+    AcceptorCount = etcp_config:value(acceptor_count
+                                     ,Opts
+                                     ,?DEF_ACCEPTOR_COUNT
+                                     ,{etcp_utils, is_whole_integer, 1}),
     case director:start_link(?MODULE, {Mod, InitArg, Port, Opts}, ?DEF_DIRECTOR_START_OPTS) of
         {ok, Pid} ->
-            AcceptorCount = etcp_utils:get_value(acceptor_count
-                                                ,Opts
-                                                ,?DEF_ACCEPTOR_COUNT
-                                                ,fun etcp_utils:is_whole_integer/1),
             continue_starting(Pid, AcceptorCount);
         {error, _}=Err ->
             Err;
         ignore ->
             ignore
     end;
-start_link(Name, Mod, InitArg, Port) when erlang:is_tuple(Name),
-                                          erlang:is_atom(Mod),
-                                          erlang:is_integer(Port) ->
+start_link(Name, Mod, InitArg, Port) when erlang:is_tuple(Name) andalso
+                                          erlang:is_atom(Mod)   andalso
+                                          erlang:is_integer(Port)    ->
     case director:start_link(Name
                             ,?MODULE
                             ,{Mod, InitArg, Port, ?DEF_START_OPTS}
@@ -127,22 +125,22 @@ start_link(Name, Mod, InitArg, Port) when erlang:is_tuple(Name),
 
 
 -spec
-start_link(etcp_types:register_name()
+start_link(etcp:register_name()
           ,module()
-          ,etcp_types:init_argument()
-          ,etcp_types:port_number()
-          ,etcp_types:start_options()) ->
-    etcp_types:start_return().
-start_link(Name, Mod, InitArg, Port, Opts) when erlang:is_tuple(Name),
-                                                erlang:is_atom(Mod),
-                                                erlang:is_integer(Port),
-                                                erlang:is_map(Opts) ->
+          ,etcp:init_argument()
+          ,etcp:port_number()
+          ,etcp:start_options()) ->
+    etcp:start_return().
+start_link(Name, Mod, InitArg, Port, Opts) when erlang:is_tuple(Name)   andalso
+                                                erlang:is_atom(Mod)     andalso
+                                                erlang:is_integer(Port) andalso
+                                                erlang:is_map(Opts)          ->
+    AcceptorCount = etcp_config:value(acceptor_count
+                                     ,Opts
+                                     ,?DEF_ACCEPTOR_COUNT
+                                     ,{etcp_utils, is_whole_integer, 1}),
     case director:start_link(Name, ?MODULE, {Mod, InitArg, Port, Opts}, ?DEF_DIRECTOR_START_OPTS) of
         {ok, Pid} ->
-            AcceptorCount = etcp_utils:get_value(acceptor_count
-                                                ,Opts
-                                                ,?DEF_ACCEPTOR_COUNT
-                                                ,fun etcp_utils:is_whole_integer/1),
             continue_starting(Pid, AcceptorCount);
         {error, _}=Err ->
             Err;
@@ -152,128 +150,127 @@ start_link(Name, Mod, InitArg, Port, Opts) when erlang:is_tuple(Name),
 
 
 -spec
-acceptors(etcp_types:name()) ->
-    [{reference(), pid()}].
+acceptors(etcp:name()) ->
+    [{etcp:acceptor_id(), pid()}].
 acceptors(Server) when ?is_proc_ref(Server) ->
     {ok, Pid} = director:get_pid(Server, ?ACCEPTOR_ROOT_SUP),
-    etcp_acceptor_root_sup:fetch(Pid).
+    etcp_acceptor_sup:fetch(Pid).
 
 
 -spec
-connections(etcp_types:name()) ->
-    [] | [{reference(), pid()}] | 'no_process_registry'.
+connections(etcp:name()) ->
+    [] | [pid()] | 'no_process_keeper'.
 connections(Server) when ?is_proc_ref(Server) ->
-    case director:get_pid(Server, ?PROCESS_REGISTRY) of
+    case director:get_pid(Server, ?PROCESS_KEEPER) of
         {ok, Pid} ->
-            etcp_server_process_registry:fetch(Pid);
+            etcp_server_process_keeper:fetch(Pid);
         _ -> % {error, not_found}
-            no_process_registry
+            no_process_keeper
     end.
 
 
 -spec
-sleep(etcp_types:name()) ->
+suspend(etcp:name()) ->
     'ok'.
-sleep(Server) when ?is_proc_ref(Server) ->
+suspend(Server) when ?is_proc_ref(Server) ->
     {ok, Pid} = director:get_pid(Server, ?ACCEPTOR_ROOT_SUP),
-    etcp_acceptor_root_sup:sleep(Pid).
+    etcp_acceptor_sup:suspend(Pid).
 
 
 -spec
-accept(etcp_types:name()) ->
+resume(etcp:name()) ->
     'ok'.
-accept(Server) when ?is_proc_ref(Server) ->
+resume(Server) when ?is_proc_ref(Server) ->
     {ok, Pid} = director:get_pid(Server, ?ACCEPTOR_ROOT_SUP),
-    etcp_acceptor_root_sup:accept(Pid).
+    etcp_acceptor_sup:resume(Pid).
 
 
 -spec
-modes(etcp_types:name()) ->
-    etcp_types:acceptor_mode() | [etcp_types:acceptor_mode()].
+modes(etcp:name()) ->
+    etcp:acceptor_mode() | [{etcp:acceptor_id(), etcp:acceptor_mode()}].
 modes(Server) when ?is_proc_ref(Server) ->
     {ok, Pid} = director:get_pid(Server, ?ACCEPTOR_ROOT_SUP),
-    etcp_acceptor_root_sup:modes(Pid).
+    etcp_acceptor_sup:modes(Pid).
 
 
 -spec
-stop(etcp_types:name()) ->
+stop(etcp:name()) ->
     'ok'.
 stop(Server) when ?is_proc_ref(Server) ->
-    director:stop(Server, normal, ?DEF_TERMINATE_TIMEOUT).
+    director:stop(Server, normal, infinity).
 
 
 -spec
-stop(etcp_types:name(), Reason:: etcp_types:reason()) ->
+stop(etcp:name(), Reason:: etcp:reason()) ->
     'ok'.
 stop(Server, Reason) when ?is_proc_ref(Server) ->
-    director:stop(Server, Reason, ?DEF_TERMINATE_TIMEOUT).
+    director:stop(Server, Reason, infinity).
 
 %% -------------------------------------------------------------------------------------------------
 %% 'director' callback:
 
 %% @hidden
 init({Mod, InitArg, Port, Opts}) ->
-    TrMod = etcp_utils:get_value(transporter
-                                ,Opts
-                                ,?DEF_TRANSPORT_MODULE
-                                ,fun erlang:is_atom/1),
-    TrOpts = etcp_utils:get_value(transporter_options
-                                 ,Opts
-                                 ,?DEF_TRANSPORT_OPTIONS
-                                 ,fun(_) -> true end),
+    TrMod   = etcp_config:value(transporter
+                               ,Opts
+                               ,?DEF_TRANSPORTER
+                               ,{etcp_transporter, filter_transporter, 1}),
+    TrOpts  = etcp_config:value(transporter_options, Opts, ?DEF_TRANSPORTER_OPTIONS),
+    ProcReg = etcp_config:value(connection_keeper
+                               ,Opts
+                               ,?DEF_CONNECTION_PROCESS_KEEPER
+                               ,{?MODULE, filter_connection_keeper, 1}),
     case etcp_transporter:init(TrMod, TrOpts) of
         {ok, TrState} ->
-            ProcRegFlag = etcp_utils:get_value(connection_process_regisrty
-                                              ,Opts
-                                              ,?DEF_CONNECTION_PROCESS_REGISTRY
-                                              ,fun erlang:is_boolean/1),
-            case etcp_transporter:listen(TrMod, Port, TrState) of
-                {ok, {LSock, TrState2}} ->
-                    OKRet =
-                        fun(InitArgX) ->
-                            State = #?S{listen_socket = LSock
-                                       ,transporter_module = TrMod
-                                       ,transporter_state = TrState2
-                                       ,errors = []},
-                            AccRootSupChildSpec = #{id => ?ACCEPTOR_ROOT_SUP
-                                                  ,start => {etcp_acceptor_root_sup
-                                                            ,start_link
-                                                            ,[Mod, InitArgX, Opts, LSock]}},
-                            Children =
-                                if
-                                    ProcRegFlag ->
-                                        ProcRegChildSpec = #{id => ?PROCESS_REGISTRY
-                                                           ,start => {etcp_server_process_registry
-                                                                     ,start_link
-                                                                     ,[]}
-                                                           ,type => sup},
-                                        [ProcRegChildSpec, AccRootSupChildSpec];
-                                    true ->
-                                        [AccRootSupChildSpec]
-                                end,
-                            {ok, State, Children}
-                        end,
-                    try Mod:listen_init(InitArg, Opts, LSock) of
-                        ok ->
-                            OKRet(InitArg);
+            case etcp_transporter:listen(Port, TrState) of
+                {ok, TrState2} ->
+                    try Mod:etcp_server_init(InitArg) of
                         {ok, InitArg2} ->
-                            OKRet(InitArg2);
+                            Children =
+                                case ProcReg of
+                                    {child, ProcRegStart} ->
+                                        [#{id => ?PROCESS_KEEPER
+                                          ,start => ProcRegStart
+                                          ,type => sup}
+                                        ,#{id => ?ACCEPTOR_ROOT_SUP
+                                          ,start => {etcp_acceptor_sup
+                                                    ,start_link
+                                                    ,[Mod, InitArg2, Opts, TrState2]}
+                                          ,type => sup}];
+                                    false ->
+                                        [#{id => ?ACCEPTOR_ROOT_SUP
+                                          ,start => {etcp_acceptor_sup
+                                                    ,start_link
+                                                    ,[Mod, InitArg2, Opts, TrState2]}
+                                          ,type => sup}];
+                                    _ -> % {apply, _}
+                                        [#{id => ?ACCEPTOR_ROOT_SUP
+                                          ,start => {etcp_acceptor_sup
+                                                    ,start_link
+                                                    ,[Mod, InitArg2, Opts, TrState2, ProcReg]}
+                                          ,type => sup}]
+                                end,
+                            {ok, #?S{transporter_state = TrState2}, Children};
                         ignore ->
+                            _ = etcp_transporter:close(TrState2),
                             ignore;
                         {stop, _}=Stop ->
+                            _ = etcp_transporter:close(TrState2),
                             Stop;
                         Other ->
+                            _ = etcp_transporter:close(TrState2),
                             {stop, {return, [{value, Other}
                                             ,{module, Mod}
-                                            ,{function, listen_init}
-                                            ,{arguments, [InitArg, Opts, LSock]}]}}
+                                            ,{function, etcp_server_init}
+                                            ,{arguments, [InitArg]}]}}
                     catch
                         _:Rsn ->
+                            _ = etcp_transporter:close(TrState2),
                             {stop, {crash, [{reason, Rsn}
                                            ,{stacktrace, erlang:get_stacktrace()}
                                            ,{module, Mod}
-                                           ,{function, listen_init}
-                                           ,{arguments, [InitArg, Opts, LSock]}]}}
+                                           ,{function, etcp_server_init}
+                                           ,{arguments, [InitArg]}]}}
                     end;
                 {error, Rsn} ->
                     {stop, Rsn}
@@ -290,67 +287,27 @@ handle_start(_, ChildState, State, _) ->
 
 
 %% @hidden
-handle_exit(_, ChildState, Rsn, #?S{errors = Errs}=State, _) ->
-    {State2, LogFlag} =
-        case lists:member(Rsn, Errs) of
-            true ->
-                {State, false};
-            _ ->
-                LogFlag2 =
-                    if
-                        Rsn =:= normal orelse Rsn =:= shutdown ->
-                            false;
-                        true ->
-                            true
-                    end,
-                {State#?S{errors = [Rsn|Errs]}, LogFlag2}
-        end,
-    {stop, ChildState, State2, [{log, LogFlag}]}.
+handle_exit(_, ChildState, _, State, _) ->
+    {stop, ChildState, State, [{log, false}]}.
 
 
 %% @hidden
-handle_terminate(_, ChildState, Rsn, #?S{errors = Errs}=State, _) ->
-    {State2, LogFlag} =
-        case lists:member(Rsn, Errs) of
-            true ->
-                {State, false};
-            _ ->
-                LogFlag2 =
-                    if
-                        Rsn =:= normal orelse Rsn =:= shutdown ->
-                            false;
-                        true ->
-                            true
-                    end,
-                {State#?S{errors = [Rsn|Errs]}, LogFlag2}
-        end,
-    {ok, ChildState, State2, [{log, LogFlag}]}.
+handle_terminate(_, ChildState, _, State, _) ->
+    {ok, ChildState, State, [{log, false}]}.
 
 
 %% @hidden
-terminate(Rsn
-         ,#?S{listen_socket = LSock
-             ,transporter_module = TrMod
-             ,transporter_state = TrState
-             ,errors = Errs}) ->
-    _ = etcp_transporter:close(TrMod, LSock, TrState),
-    Rsn2 =
-        case Errs of
-            [Rsn3] ->
-                Rsn3;
-            [] ->
-                Rsn;
-            _ ->
-                Errs
-        end,
+terminate(Rsn, #?S{transporter_state = TrS}) ->
+    _ = etcp_transporter:close(TrS),
     LogFlag =
         if
-            Rsn2 =:= normal orelse Rsn2 =:= shutdown ->
+            % We don't want log if we are stopping normally or our supervisor is stopping us:
+            Rsn =:= normal orelse Rsn =:= shutdown orelse erlang:element(1, Rsn) =:= shutdown ->
                 false;
             true ->
                 true
         end,
-    {new_error, Rsn2, [{log, LogFlag}]}.
+    {ok, [{log, LogFlag}]}.
 
 %% -------------------------------------------------------------------------------------------------
 %% Internal functions:
@@ -359,15 +316,30 @@ terminate(Rsn
 continue_starting(Pid, AcceptorCount) ->
     {ok, AccRootSup} = director:get_pid(Pid, ?ACCEPTOR_ROOT_SUP),
     AddFun =
-        case director:get_pid(Pid, ?PROCESS_REGISTRY) of
+        case director:get_pid(Pid, ?PROCESS_KEEPER) of
             {ok, ProcReg} ->
-                fun(_) ->
-                    etcp_acceptor_root_sup:start_acceptor_sup(AccRootSup, ProcReg)
+                fun(Id) ->
+                    etcp_acceptor_sup:start_acceptor(AccRootSup, Id, ProcReg)
                 end;
-            _ -> % {error, not_found}
-                fun(_) ->
-                    etcp_acceptor_root_sup:start_acceptor_sup(AccRootSup)
+            _ -> % {error, not_found} and we did not want a process registry child
+                fun(Id) ->
+                    etcp_acceptor_sup:start_acceptor(AccRootSup, Id)
                 end
         end,
-    _ = lists:foreach(AddFun, lists:seq(1, AcceptorCount)),
+    _ = lists:foreach(AddFun, lists:seq(1, AcceptorCount)), % Acceptor Ids: 1, 2, 3, ...
     {ok, Pid}.
+
+
+filter_connection_keeper(false) ->
+    {ok, false}; % Yield false
+filter_connection_keeper(true) ->
+    {ok, {child, {etcp_server_process_keeper, start_link, []}}};
+filter_connection_keeper({child, {Mod, Func, Args}}) when erlang:is_atom(Mod)  andalso
+                                                          erlang:is_atom(Func) andalso
+                                                          erlang:is_list(Args)      ->
+    true; % Yield Arg
+filter_connection_keeper({apply, {Mod, Func}}) when erlang:is_atom(Mod) andalso
+                                                    erlang:is_atom(Func)     ->
+    true; % Yield Arg
+filter_connection_keeper(_) ->
+    false.

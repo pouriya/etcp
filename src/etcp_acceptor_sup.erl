@@ -36,19 +36,19 @@
 %%
 %% @end
 %% -------------------------------------------------------------------------------------------------
--module(etcp_acceptor_root_sup).
+-module(etcp_acceptor_sup).
 -author("pouriya.jahanbakhsh@gmail.com").
 %% -------------------------------------------------------------------------------------------------
 %% Exports:
 
 %% API:
 -export([start_link/4
+        ,start_link/5
         ,fetch/1
-        ,sleep/1
-        ,accept/1
+        ,suspend/1
+        ,resume/1
         ,modes/1
-        ,start_acceptor_sup/2
-        ,start_acceptor_sup/3]).
+        ,start_acceptor/2]).
 
 %% 'director' callbacks:
 -export([init/1
@@ -61,10 +61,11 @@
 %% Records & Macros & Includes:
 
 -define(S, state).
--record(?S, {errors}).
+-record(?S, {}).
+
+-define(NO_PROCESS_KEEPER, 'undefined').
 
 -define(DEF_START_OPTS, []).
--define(DEF_ACCEPTOR_COUNT, 3).
 -include("internal/etcp_guard.hrl").
 -include("internal/etcp_acceptor.hrl").
 
@@ -72,66 +73,64 @@
 %% API:
 
 -spec
-start_link(module(), term(), etcp_types:start_options(), etcp_types:socket()) ->
-    etcp_types:start_return().
-start_link(Mod, InitArg, Opts, LSock) when erlang:is_map(Opts) ->
-    director:start_link(?MODULE, {Mod, InitArg, Opts, LSock}, ?DEF_START_OPTS).
+start_link(module(), term(), etcp:start_options(), etcp:socket()) ->
+    etcp:start_return().
+start_link(Mod, InitArg, Opts, TrS) when erlang:is_map(Opts) ->
+    director:start_link(?MODULE, {Mod, InitArg, Opts, TrS, ?NO_PROCESS_KEEPER}, ?DEF_START_OPTS).
 
 
 -spec
-fetch(etcp_types:name()) ->
-    [] | [{reference(), pid()}].
+start_link(module(), term(), etcp:start_options(), etcp:socket(), etcp:process_registry()) ->
+    etcp:start_return().
+start_link(Mod, InitArg, Opts, TrS, ProcKeeper) when erlang:is_map(Opts) ->
+    director:start_link(?MODULE, {Mod, InitArg, Opts, TrS, ProcKeeper}, ?DEF_START_OPTS).
+
+
+-spec
+fetch(etcp:name()) ->
+    [] | [{etcp:acceptor_id(), pid()}].
 %% @doc
-%%      returns all acceptors.
+%%      returns all acceptor managers.
 %% @end
 fetch(AccRootSup) when erlang:is_pid(AccRootSup) ->
     {ok, Pids} = director:get_pids(AccRootSup),
-    Fold =
-        fun
-            ({ok, AccInfo}, Acc) ->
-                [AccInfo|Acc];
-            (_, Acc) ->
-                Acc
-        end,
-    lists:foldl(Fold, [], [etcp_acceptor_sup:fetch(AccSupPid) || {_, AccSupPid} <- Pids]).
+    Pids.
 
 
 -spec
-sleep(etcp_types:name()) ->
+suspend(etcp:name()) ->
     'ok'.
-sleep(AccRootSup) when erlang:is_pid(AccRootSup) ->
+suspend(AccRootSup) when erlang:is_pid(AccRootSup) ->
     {ok, AccSups} = director:get_pids(AccRootSup),
-    ForEach =
+    SuspendFun =
         fun({_, AccPid}) ->
-            etcp_acceptor_sup:sleep(AccPid)
+            etcp_acceptor_manager:suspend(AccPid)
         end,
-    lists:foreach(ForEach, AccSups).
+    lists:foreach(SuspendFun, AccSups).
 
 
 -spec
-accept(etcp_types:name()) ->
+resume(etcp:name()) ->
     'ok'.
-accept(AccRootSup) when erlang:is_pid(AccRootSup) ->
+resume(AccRootSup) when erlang:is_pid(AccRootSup) ->
     {ok, AccSups} = director:get_pids(AccRootSup),
-    ForEach =
+    ResumeFun =
         fun({_, AccPid}) ->
-            etcp_acceptor_sup:accept(AccPid)
+            etcp_acceptor_manager:resume(AccPid)
         end,
-    lists:foreach(ForEach, AccSups).
+    lists:foreach(ResumeFun, AccSups).
 
 
 -spec
-modes(etcp_types:name()) ->
-    etcp_types:acceptor_mode() | [etcp_types:acceptor_mode()].
+modes(etcp:name()) ->
+    etcp:acceptor_mode() | [etcp:acceptor_mode()].
 modes(AccRootSup) when erlang:is_pid(AccRootSup) ->
     {ok, AccSups} = director:get_pids(AccRootSup),
-    Modes = [Mode
-            || Mode <- [etcp_acceptor_sup:mode(AccSupPid) || {_, AccSupPid} <- AccSups]
-            ,Mode == ?ACCEPTOR_ACCEPT_MODE orelse Mode == ?ACCEPTOR_SLEEP_MODE],
+    Modes = [{Id, etcp_acceptor_manager:mode(AccSupPid)} || {Id, AccSupPid} <- AccSups],
     case Modes of
-        [Mode|_] ->
-            All =
-                fun(Mode_) ->
+        [{_, Mode}, _ | _] ->
+            FilterFun =
+                fun({_, Mode_}) ->
                     if
                         Mode == Mode_ ->
                             true;
@@ -139,23 +138,37 @@ modes(AccRootSup) when erlang:is_pid(AccRootSup) ->
                             false
                     end
                 end,
-            case lists:all(All, Modes) of
+            case lists:all(FilterFun, Modes) of
                 true ->
                     Mode;
-                false ->
+                _ -> % false
                     Modes
             end;
-        _ ->
-            Modes
+        [{_, Mode}] ->
+            Mode
     end.
 
 
+%%-spec
+%%start_acceptor(etcp:name(), term(), etcp:name()) ->
+%%    'ok' | etcp:error().
+%%start_acceptor(AccRootSup, Id, ProcKeeper) when erlang:is_pid(AccRootSup) ->
+%%    case director:start_child(AccRootSup
+%%                             ,#{start => {etcp_acceptor_manager, start_link, [ProcKeeper]}
+%%                               ,id => Id
+%%                               ,append => true}) of
+%%        {ok, _} ->
+%%            ok;
+%%        Err -> % {error, _}
+%%            Err
+%%    end.
+
+
 -spec
-start_acceptor_sup(etcp_types:name(), term(), etcp_types:name()) ->
-    'ok' | etcp_types:error().
-start_acceptor_sup(AccRootSup, Id, ProcReg) when erlang:is_pid(AccRootSup) andalso
-                                                 ?is_process_registry(ProcReg)  ->
-    case director:start_child(AccRootSup, #{start => {etcp_acceptor_sup, start_link, [ProcReg]}
+start_acceptor(etcp:name(), term()) ->
+    'ok' | etcp:error().
+start_acceptor(AccRootSup, Id) when erlang:is_pid(AccRootSup) ->
+    case director:start_child(AccRootSup, #{start => {etcp_acceptor_manager, start_link, []}
                                            ,id => Id
                                            ,append => true}) of
         {ok, _} ->
@@ -164,20 +177,20 @@ start_acceptor_sup(AccRootSup, Id, ProcReg) when erlang:is_pid(AccRootSup) andal
             Err
     end.
 
-
--spec
-start_acceptor_sup(etcp_types:name(), term()) ->
-    'ok' | etcp_types:error().
-start_acceptor_sup(AccRootSup, Id) when erlang:is_pid(AccRootSup) ->
-    start_acceptor_sup(AccRootSup, Id, undefined).
-
 %% -------------------------------------------------------------------------------------------------
 %% 'director' callbacks:
 
-init({Mod, InitArg, Opts, LSock}) ->
-    DefChildSpec = #{start => {etcp_acceptor_sup, start_link, [Mod, InitArg, Opts, LSock]}
-                    ,type => sup},
-    {ok, #?S{errors = []}, [], DefChildSpec}.
+%% @hidden
+init({Mod, InitArg, Opts, TrS, ProcKeeper}) ->
+    Args =
+        if
+            ProcKeeper == ?NO_PROCESS_KEEPER ->
+                [Mod, InitArg, Opts, TrS];
+            true -> % {apply, _} | Pid
+                [Mod, InitArg, Opts, TrS, ProcKeeper]
+    end,
+    DefChildSpec = #{start => {etcp_acceptor_manager, start_link, Args}},
+    {ok, #?S{}, [], DefChildSpec}.
 
 
 %% @hidden
@@ -186,59 +199,15 @@ handle_start(_, ChildState, State, _) ->
 
 
 %% @hidden
-handle_exit(_, ChildState, Rsn, #?S{errors = Errs}=State, _) ->
-    {State2, LogFlag} =
-        case lists:member(Rsn, Errs) of
-            true ->
-                {State, false};
-            _ ->
-                LogFlag2 =
-                    if
-                        Rsn =:= normal orelse Rsn =:= shutdown ->
-                            false;
-                        true ->
-                            true
-                    end,
-                {State#?S{errors = [Rsn|Errs]}, LogFlag2}
-        end,
-    {stop, ChildState, State2, [{log, LogFlag}]}.
+handle_exit(_, ChildState, _, State, _) ->
+    {stop, ChildState, State, [{log, false}]}.
 
 
 %% @hidden
-handle_terminate(_, ChildState, Rsn, #?S{errors = Errs}=State, _) ->
-    {State2, LogFlag} =
-        case lists:member(Rsn, Errs) of
-            true ->
-                {State, false};
-            _ ->
-                LogFlag2 =
-                    if
-                        Rsn =:= normal orelse Rsn =:= shutdown ->
-                            false;
-                        true ->
-                            true
-                    end,
-                {State#?S{errors = [Rsn|Errs]}, LogFlag2}
-        end,
-    {ok, ChildState, State2, [{log, LogFlag}]}.
+handle_terminate(_, ChildState, _, State, _) ->
+    {ok, ChildState, State, [{log, false}]}.
 
 
 %% @hidden
-terminate(Rsn, #?S{errors = Errs}) ->
-    Rsn2 =
-        case Errs of
-            [Rsn3] ->
-                Rsn3;
-            [] ->
-                Rsn;
-            _ ->
-                Errs
-        end,
-    LogFlag =
-        if
-            Rsn2 =:= normal orelse Rsn2 =:= shutdown ->
-                false;
-            true ->
-                true
-        end,
-    {new_error, Rsn2, [{log, LogFlag}]}.
+terminate(_, _) ->
+    {ok, [{log, false}]}.

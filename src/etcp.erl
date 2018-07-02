@@ -51,8 +51,8 @@
         ,stop_server/1
         ,stop_server/2
         ,fetch_acceptors/1
-        ,sleep/1
-        ,accept/1
+        ,suspend/1
+        ,resume/1
         ,modes/1
         ,fetch_server_connections/1]).
 
@@ -69,12 +69,12 @@
 -export([start_link_connection/4
         ,start_link_connection/5
         ,start_link_connection/6
-        ,send_sync/2
-        ,send_sync/3
-        ,send_async/2
         ,stop_connection/1
         ,stop_connection/2
-        ,stop_connection/3]).
+        ,stop_connection/3
+        ,send_sync/2
+        ,send_sync/3
+        ,send_async/2]).
 
 %% -------------------------------------------------------------------------------------------------
 %% Records & Macros & Includes:
@@ -82,88 +82,71 @@
 -include("internal/etcp_guard.hrl").
 
 %% -------------------------------------------------------------------------------------------------
-%% Behaviour info:
+%% Types:
 
-%% Mandatory for server implementation.
-%%-callback
-%%listen_init(etcp_types:init_argument()
-%%           ,etcp_types:port_number()
-%%           ,etcp_types:start_options()
-%%           ,etcp_types:socket()) ->
-%%    etcp_types:listen_init_callback_return().
+-opaque name() :: pid() | atom() | tuple().
 
+-type init_argument() :: any().
 
--callback
-connection_init(etcp_types:init_argument(), etcp_types:metadata()) ->
-    etcp_types:callback_return().
+-opaque start_return() :: {'ok', pid()} | {'error', term()} | 'ignore'.
 
+-opaque register_name() :: {'local', atom()}
+                         | {'global', atom()}
+                         | {'via', module(), term()}.
 
-%% When a TCP packet arrives.
--callback
-handle_packet(etcp_types:packet(), etcp_types:state(), etcp_types:metadata()) ->
-    etcp_types:callback_return().
+-opaque start_options() :: #{'acceptor_count' => pos_integer()
+                            ,'acceptor_mode' => acceptor_mode()
+                            ,'acceptor_debug' => debug()
+                            ,'transporter' => atom() % tcp, ssl, your own
+                            ,'transporter_options' => transporter_options()
+                            ,'connection_debug' => debug()
+                            ,'connection_process_keeper' => boolean()}.
 
+-opaque acceptor_mode() :: 'accept' | 'sleep'.
 
-%% When you want to send Erlang call to connection handler processes.
--callback
-handle_call(Request::any(), From::tuple(), etcp_types:state(), etcp_types:metadata()) ->
-    etcp_types:callback_return().
+-opaque acceptor_id() :: pos_integer().
 
+-opaque process_registry() :: pid() | {'apply', {module(), atom()}}.
 
-%% When you want to send cast to connection handler processes.
--callback
-handle_cast(Cast::any(), etcp_types:state(), etcp_types:metadata()) ->
-    etcp_types:callback_return().
+-opaque debug() :: [sys:dbg_opt()] | [].
 
+-type transporter_options() :: term(). % Depends on transporter
+                                       % for tcp use gen_tcp:options()
+                                       % for ssl use ssl:options()
 
-%% When you want to send event to connection handler processes. Message in form of {'$gen_event', _}
--callback
-handle_event(Event::any(), etcp_types:state(), etcp_types:metadata()) ->
-    etcp_types:callback_return().
+-opaque addresses() :: [] | [address()].
+-opaque  address() :: {hostname(), port_number()} | {'undefined', 'undefined'}.
+-opaque   port_number() :: inet:port_number().
+-opaque   hostname() :: inet:hostname() | inet:socket_address().
 
+-type packet() :: any(). % Depends on transporter
+                         % for tcp and ssl it must be:
+                         % string() | binary | iolist()
 
-%% When you want to send other Erlang messages to connection handler processes.
--callback
-handle_info(Msg::any(), etcp_types:state(), etcp_types:metadata()) ->
-    etcp_types:callback_return().
-
-
-%% Useful you want to use 'timeout' option in return value of other callbacks.
-%%-callback
-%%timeout(etcp_types:state(), etcp_types:metadata()) ->
-%%    etcp_types:callback_return().
-
-
-%% Useful you want to use 'srtimeout' option in return value of other callbacks when you are using
-%% passive sockets.
-%%-callback
-%%srtimeout(etcp_types:state(), etcp_types:metadata()) ->
-%%    etcp_types:callback_return().
-
-
-%% Will be called when connection is closed by other side.
--callback
-handle_disconnect(etcp_types:state(), etcp_types:metadata()) ->
-    etcp_types:callback_return().
-
-
--callback
-terminate(etcp_types:reason(), etcp_types:state(), etcp_types:metadata()) ->
-    etcp_types:terminate_callback_return().
-
-
--callback
-code_change(OldVsn::any(), etcp_types:state(), Extra::any()) ->
-    etcp_types:code_change_callback_return().
+-export_type([name/0
+             ,start_return/0
+             ,register_name/0
+             ,start_options/0
+             ,port_number/0
+             ,hostname/0
+             ,acceptor_mode/0
+             ,acceptor_id/0
+             ,process_registry/0
+             ,addresses/0
+             ,address/0
+             ,init_argument/0
+             ,debug/0
+             ,transporter_options/0
+             ,packet/0]).
 
 %% -------------------------------------------------------------------------------------------------
 %% API functions:
 
 -spec
-start_link_server(module(), etcp_types:init_argument(), etcp_types:port_number()) ->
-    etcp_types:start_return().
+start_link_server(module(), init_argument(), port_number()) ->
+    start_return().
 %% @doc
-%%      Starts and links a socket server.
+%%      Starts and links a TCP server.
 %% @end
 start_link_server(Mod, InitArg, Port) when erlang:is_atom(Mod),
                                            erlang:is_integer(Port) ->
@@ -171,46 +154,46 @@ start_link_server(Mod, InitArg, Port) when erlang:is_atom(Mod),
 
 
 -spec
-start_link_server(etcp_types:register_name() | module()
-                 ,module() | etcp_types:init_argument()
-                 , etcp_types:init_argument() | etcp_types:port_number()
-                 , etcp_types:port_number() | etcp_types:start_options()) ->
-    etcp_types:start_return().
+start_link_server(register_name() | module()
+                 ,module()        | init_argument()
+                 ,init_argument() | port_number()
+                 ,port_number()   | start_options()) ->
+    start_return().
 %% @doc
-%%      Starts and links a socket server.
+%%      Starts and links a TCP server.
 %% @end
-start_link_server(Name_or_Mod
-                 ,Mod_or_InitArg
-                 ,InitArg_or_Port
-                 ,Port_or_Opts) when (erlang:is_tuple(Name_or_Mod) andalso
-                                      erlang:is_atom(Mod_or_InitArg) andalso
-                                      erlang:is_integer(Port_or_Opts)) orelse
-                                     (erlang:is_atom(Name_or_Mod) andalso
-                                      erlang:is_integer(InitArg_or_Port) andalso
-                                      erlang:is_map(Port_or_Opts))->
-    etcp_server:start_link(Name_or_Mod, Mod_or_InitArg, InitArg_or_Port, Port_or_Opts).
+start_link_server(Name, Mod, InitArg, Port) when erlang:is_tuple(Name) andalso
+                                                 erlang:is_atom(Mod)   andalso
+                                                 erlang:is_integer(Port)    ->
+    etcp_server:start_link(Name, Mod, InitArg, Port);
+
+start_link_server(Mod, InitArg, Port, Opts) when erlang:is_atom(Mod)     andalso
+                                                 erlang:is_integer(Port) andalso
+                                                 erlang:is_map(Opts)          ->
+    etcp_server:start_link(Mod, InitArg, Port, Opts).
+
 
 
 -spec
-start_link_server(etcp_types:register_name()
+start_link_server(register_name()
                  ,module()
-                 , etcp_types:init_argument()
-                 , etcp_types:port_number()
-                 , etcp_types:start_options()) ->
-    etcp_types:start_return().
+                 ,init_argument()
+                 ,port_number()
+                 ,start_options()) ->
+    start_return().
 %% @doc
-%%      Starts and links a socket server.
+%%      Starts and links a TCP server.
 %% @end
-start_link_server(Name, Mod, InitArg, Port, Opts) when erlang:is_tuple(Name) andalso
-                                                       erlang:is_atom(Mod) andalso
+start_link_server(Name, Mod, InitArg, Port, Opts) when erlang:is_tuple(Name)   andalso
+                                                       erlang:is_atom(Mod)     andalso
                                                        erlang:is_integer(Port) andalso
-                                                       erlang:is_map(Opts) ->
+                                                       erlang:is_map(Opts)          ->
     etcp_server:start_link(Name, Mod, InitArg, Port, Opts).
 
 
 -spec
-fetch_server_connections(etcp_types:name()) ->
-    [] | [{reference(), pid()}].
+fetch_server_connections(name()) ->
+    [] | [pid()].
 %% @doc
 %%      Returns all available server connections.
 %% @end
@@ -219,8 +202,8 @@ fetch_server_connections(Server) when ?is_proc_ref(Server) ->
 
 
 -spec
-fetch_acceptors(etcp_types:name()) ->
-    [] | [{reference(), pid()}].
+fetch_acceptors(name()) ->
+    [] | [{acceptor_id(), pid()}].
 %% @doc
 %%      Returns all server acceptors.
 %% @end
@@ -229,28 +212,28 @@ fetch_acceptors(Server) when ?is_proc_ref(Server) ->
 
 
 -spec
-sleep(etcp_types:name()) ->
+suspend(name()) ->
     'ok'.
 %% @doc
 %%      Turns all server acceptors to sleep mode.
 %% @end
-sleep(Server) when ?is_proc_ref(Server) ->
-    etcp_server:sleep(Server).
+suspend(Server) when ?is_proc_ref(Server) ->
+    etcp_server:suspend(Server).
 
 
 -spec
-accept(etcp_types:name()) ->
+resume(name()) ->
     'ok'.
 %% @doc
 %%      Turns all server acceptors to accept mode.
 %% @end
-accept(Server) when ?is_proc_ref(Server) ->
-    etcp_server:accept(Server).
+resume(Server) when ?is_proc_ref(Server) ->
+    etcp_server:resume(Server).
 
 
 -spec
-modes(etcp_types:name()) ->
-    etcp_types:acceptor_mode() | [etcp_types:acceptor_mode()].
+modes(name()) ->
+    acceptor_mode() | [{acceptor_id(), acceptor_mode()}].
 %% @doc
 %%      Returns mode(s) of server acceptors.
 %% @end
@@ -259,7 +242,7 @@ modes(Server) when ?is_proc_ref(Server) ->
 
 
 -spec
-stop_server(etcp_types:name()) ->
+stop_server(name()) ->
     'ok'.
 %% @doc
 %%      stops server and all connections it has.
@@ -269,7 +252,7 @@ stop_server(Server) when ?is_proc_ref(Server) ->
 
 
 -spec
-stop_server(etcp_types:name(), etcp_types:reason())->
+stop_server(name(), term())->
     'ok'.
 %% @doc
 %%      stops server and all connections it has.
@@ -279,57 +262,55 @@ stop_server(Server, Reason) when ?is_proc_ref(Server) ->
 
 
 -spec
-start_link_connection_pool(module(), etcp_types:init_argument(), etcp_types:addresses()) ->
-    etcp_types:start_return().
+start_link_connection_pool(module(), init_argument(), addresses()) ->
+    start_return().
 %% @doc
 %%      Starts and links a socket connection pool.
 %% @end
 start_link_connection_pool(Mod, InitArg, Addrs) when erlang:is_atom(Mod) andalso
-                                                    erlang:is_list(Addrs) ->
+                                                     erlang:is_list(Addrs) ->
     etcp_connection_pool:start_link(Mod, InitArg, Addrs).
 
 
 -spec
-start_link_connection_pool(etcp_types:register_name()| module()
-                         ,module() | etcp_types:init_argument()
-                         ,etcp_types:init_argument() | etcp_types:addresses()
-                         ,etcp_types:addresses() | etcp_types:start_options()) ->
-    etcp_types:start_return().
+start_link_connection_pool(register_name() | module()
+                          ,module()        | init_argument()
+                          ,init_argument() | addresses()
+                          ,addresses()     | start_options()) ->
+    start_return().
 %% @doc
-%%      Starts and links a socket connection pool.
+%%      Starts and links a TCP connection pool.
 %% @end
-start_link_connection_pool(Name_or_Mod
-                         ,Mod_or_InitArg
-                         ,InitArg_or_Addrs
-                         ,Addrs_or_Opts) when (erlang:is_tuple(Name_or_Mod) andalso
-                                               erlang:is_atom(Mod_or_InitArg) andalso
-                                               erlang:is_list(Addrs_or_Opts)) orelse
-                                              (erlang:is_atom(Name_or_Mod) andalso
-                                               erlang:is_list(InitArg_or_Addrs) andalso
-                                               erlang:is_map(Addrs_or_Opts)) ->
-    etcp_connection_pool:start_link(Name_or_Mod, Mod_or_InitArg, InitArg_or_Addrs, Addrs_or_Opts).
+start_link_connection_pool(Name, Mod, InitArg, Addrs) when erlang:is_tuple(Name) andalso
+                                                           erlang:is_atom(Mod)   andalso
+                                                           erlang:is_list(Addrs)      ->
+    etcp_connection_pool:start_link(Name, Mod, InitArg, Addrs);
 
+start_link_connection_pool(Mod, InitArg, Addrs, Opts) when erlang:is_atom(Mod)   andalso
+                                                           erlang:is_list(Addrs) andalso
+                                                           erlang:is_map(Opts)        ->
+    etcp_connection_pool:start_link(Mod, InitArg, Addrs, Opts).
 
 -spec
-start_link_connection_pool(etcp_types:register_name()
-                         ,module()
-                         ,etcp_types:init_argument()
-                         ,etcp_types:addresses()
-                         ,etcp_types:start_options()) ->
-    etcp_types:start_return().
+start_link_connection_pool(register_name()
+                          ,module()
+                          ,init_argument()
+                          ,addresses()
+                          ,start_options()) ->
+    start_return().
 %% @doc
 %%      Starts and links a socket connection pool.
 %% @end
 start_link_connection_pool(Name, Mod, InitArg, Addrs, Opts) when erlang:is_tuple(Name) andalso
-                                                                 erlang:is_atom(Mod) andalso
+                                                                 erlang:is_atom(Mod)   andalso
                                                                  erlang:is_list(Addrs) andalso
-                                                                 erlang:is_map(Opts) ->
+                                                                 erlang:is_map(Opts)        ->
     etcp_connection_pool:start_link(Name, Mod, InitArg, Addrs, Opts).
 
 
 -spec
-fetch_pool_connections(etcp_types:name()) ->
-    [] | [{{reference(), etcp_types:address()}, pid()}].
+fetch_pool_connections(name()) ->
+    [] | [{{reference(), address()}, pid()}].
 %% @doc
 %%      Returns all available pool connections.
 %% @end
@@ -338,19 +319,19 @@ fetch_pool_connections(Pool) when ?is_proc_ref(Pool) ->
 
 
 -spec
-add_connection(etcp_types:name(), etcp_types:host(), etcp_types:port_number()) ->
-    etcp_types:start_return().
+add_connection(name(), hostname(), port_number()) ->
+    start_return().
 %% @doc
 %%      Adds new connection for Host:Port in pool.
 %% @end
 add_connection(Pool, Host, Port) when ?is_proc_ref(Pool) andalso
-                                     ?is_host(Host) andalso
-                                     erlang:is_integer(Port) ->
+                                      ?is_host(Host)     andalso
+                                      erlang:is_integer(Port) ->
     etcp_connection_pool:add(Pool, Host, Port).
 
 
 -spec
-stop_connection_pool(etcp_types:name()) ->
+stop_connection_pool(name()) ->
     'ok'.
 %% @doc
 %%      stops pool and all connections it has.
@@ -360,7 +341,7 @@ stop_connection_pool(Pool) when ?is_proc_ref(Pool) ->
 
 
 -spec
-stop_connection_pool(etcp_types:name(), etcp_types:reason()) ->
+stop_connection_pool(name(), term()) ->
     'ok'.
 %% @doc
 %%      stops pool and all connections it has with specific reason.
@@ -371,70 +352,64 @@ stop_connection_pool(Pool, Reason) when ?is_proc_ref(Pool) ->
 
 -spec
 start_link_connection(module()
-                     ,etcp_types:init_argument()
-                     ,etcp_types:hostname()
-                     ,etcp_types:port_number()) ->
-    etcp_types:start_return().
+                     ,init_argument()
+                     ,hostname()
+                     ,port_number()) ->
+    start_return().
 %% @doc
 %%      Starts and links a socket connection process.
 %% @end
 start_link_connection(Mod, InitArg, Host, Port)  when erlang:is_atom(Mod) andalso
-                                                     ?is_host(Host) andalso
-                                                     erlang:is_integer(Port) ->
+                                                      ?is_host(Host)      andalso
+                                                      erlang:is_integer(Port)  ->
     etcp_connection:start_link(Mod, InitArg, Host, Port).
 
 
 -spec
-start_link_connection(etcp_types:register_name() | module()
-                     ,module() | etcp_types:init_argument()
-                     ,etcp_types:init_argument() | etcp_types:hostname()
-                     ,etcp_types:hostname() | etcp_types:port_number()
-                     ,etcp_types:port_number() | etcp_types:start_options()) ->
-    etcp_types:start_return().
+start_link_connection(register_name() | module()
+                     ,module()        | init_argument()
+                     ,init_argument() | hostname()
+                     ,hostname()      | port_number()
+                     ,port_number()   | start_options()) ->
+    start_return().
 %% @doc
 %%      Starts and links a socket connection process.
 %% @end
-start_link_connection(Name_or_Mod
-                     ,Mod_or_InitArg
-                     ,InitArg_or_Host
-                     ,Host_or_Port
-                     ,Port_or_Opts) when (erlang:is_tuple(Name_or_Mod) andalso
-                                          erlang:is_atom(Mod_or_InitArg) andalso
-                                          ?is_host(Host_or_Port) andalso
-                                          erlang:is_integer(Port_or_Opts)) orelse
-                                          (erlang:is_atom(Name_or_Mod) andalso
-                                          ?is_host(InitArg_or_Host) andalso
-                                          erlang:is_integer(Host_or_Port) andalso
-                                          erlang:is_map(Port_or_Opts)) ->
-    etcp_connection:start_link(Name_or_Mod
-                              ,Mod_or_InitArg
-                              ,InitArg_or_Host
-                              ,Host_or_Port
-                              ,Port_or_Opts).
+start_link_connection(Name, Mod, InitArg, Host, Port) when erlang:is_tuple(Name) andalso
+                                                           erlang:is_atom(Mod)   andalso
+                                                           ?is_host(Host)        andalso
+                                                           erlang:is_integer(Port)    ->
+    etcp_connection:start_link(Name, Mod, InitArg, Host, Port);
+
+start_link_connection(Mod, InitArg, Host, Port, Opts) when erlang:is_atom(Mod)     andalso
+                                                           ?is_host(Host)          andalso
+                                                           erlang:is_integer(Port) andalso
+                                                           erlang:is_map(Opts)          ->
+    etcp_connection:start_link(Mod, InitArg, Host, Port, Opts).
 
 
 -spec
-start_link_connection(etcp_types:register_name()
+start_link_connection(register_name()
                      ,module()
-                     ,etcp_types:init_argument()
-                     ,etcp_types:hostname()
-                     ,etcp_types:port_number()
-                     ,etcp_types:start_options()) ->
-    etcp_types:start_return().
+                     ,init_argument()
+                     ,hostname()
+                     ,port_number()
+                     ,start_options()) ->
+    start_return().
 %% @doc
 %%      Starts and links a socket connection process.
 %% @end
-start_link_connection(Name, Mod, InitArg, Host, Port, Opts) when erlang:is_tuple(Name) andalso
-                                                                 erlang:is_atom(Mod) andalso
-                                                                 ?is_host(Host) andalso
+start_link_connection(Name, Mod, InitArg, Host, Port, Opts) when erlang:is_tuple(Name)   andalso
+                                                                 erlang:is_atom(Mod)     andalso
+                                                                 ?is_host(Host)          andalso
                                                                  erlang:is_integer(Port) andalso
-                                                                 erlang:is_map(Opts) ->
+                                                                 erlang:is_map(Opts)          ->
     etcp_connection:start_link(Name, Mod, InitArg, Host, Port, Opts).
 
 
 -spec
-send_sync(etcp_types:name(), etcp_types:packet()) ->
-    'ok' | etcp_types:error().
+send_sync(name(), packet()) ->
+    'ok' | {error, {atom(), [] | [{atom(), term()}]} | term()}.
 %% @doc
 %%      Sends packet synchronously through connection.
 %% @end
@@ -443,8 +418,8 @@ send_sync(Con, Packet) when ?is_proc_ref(Con) ->
 
 
 -spec
-send_sync(etcp_types:name(), etcp_types:packet(), timeout()) ->
-    'ok' | etcp_types:error().
+send_sync(name(), packet(), timeout()) ->
+    'ok' | {error, {atom(), [] | [{atom(), term()}]} | term()}.
 %% @doc
 %%      Sends packet synchronously through connection with timeout.
 %% @end
@@ -453,7 +428,7 @@ send_sync(Con, Packet, Timeout) when ?is_proc_ref(Con) andalso ?is_timeout(Timeo
 
 
 -spec
-send_async(etcp_types:name(), etcp_types:packet()) ->
+send_async(name(), packet()) ->
     'ok'.
 %% @doc
 %%      Sends packet asynchronously through connection.
@@ -463,7 +438,7 @@ send_async(Con, Packet) when ?is_proc_ref(Con) ->
 
 
 -spec
-stop_connection(etcp_types:name()) ->
+stop_connection(name()) ->
     'ok'.
 %% @doc
 %%      Stops connection.
@@ -473,7 +448,7 @@ stop_connection(Con) when ?is_proc_ref(Con) ->
 
 
 -spec
-stop_connection(etcp_types:name(), etcp_types:reason()) ->
+stop_connection(name(), term()) ->
     'ok'.
 %% @doc
 %%      Stops connection with specific reason.
@@ -483,7 +458,7 @@ stop_connection(Con, Reason) when ?is_proc_ref(Con) ->
 
 
 -spec
-stop_connection(etcp_types:name(), etcp_types:reason(), timeout()) ->
+stop_connection(name(), term(), timeout()) ->
     'ok'.
 %% @doc
 %%      Stops connection with specific reason.

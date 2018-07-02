@@ -32,22 +32,25 @@
 %%% ------------------------------------------------------------------------------------------------
 %% @author  Pouriya Jahanbakhsh <pouriya.jahanbakhsh@gmail.com>
 %% @version 17.9.10
-%% @hidden
+%% @doc
+%%
+%% @end
 %% -------------------------------------------------------------------------------------------------
--module(etcp_acceptor_sup).
+-module(etcp_acceptor_root_sup).
 -author("pouriya.jahanbakhsh@gmail.com").
 %% -------------------------------------------------------------------------------------------------
 %% Exports:
 
 %% API:
--export([start_link/5
+-export([start_link/4
         ,fetch/1
         ,sleep/1
         ,accept/1
-        ,mode/1
-        ,start_acceptor/1]).
+        ,modes/1
+        ,start_acceptor_sup/2
+        ,start_acceptor_sup/3]).
 
-%% 'director' callback:
+%% 'director' callbacks:
 -export([init/1
         ,handle_start/4
         ,handle_exit/5
@@ -59,95 +62,122 @@
 
 -define(S, state).
 -record(?S, {errors}).
--define(DEF_START_OPTS, []).
 
+-define(DEF_START_OPTS, []).
+-define(DEF_ACCEPTOR_COUNT, 3).
 -include("internal/etcp_guard.hrl").
+-include("internal/etcp_acceptor.hrl").
 
 %% -------------------------------------------------------------------------------------------------
-%% API functions:
+%% API:
 
 -spec
-start_link(module(), term(), etcp_types:start_options(), etcp_types:socket(), pid()) ->
+start_link(module(), term(), etcp_types:start_options(), etcp_types:socket()) ->
     etcp_types:start_return().
-start_link(Mod, InitArg, Opts, LSock, ProcReg) when erlang:is_map(Opts) andalso 
-                                                    ?is_process_registry(ProcReg) ->
-    director:start_link(?MODULE, {Mod, InitArg, Opts, LSock, ProcReg}, ?DEF_START_OPTS).
+start_link(Mod, InitArg, Opts, LSock) when erlang:is_map(Opts) ->
+    director:start_link(?MODULE, {Mod, InitArg, Opts, LSock}, ?DEF_START_OPTS).
 
 
 -spec
 fetch(etcp_types:name()) ->
-    {'ok', {reference(), pid()}} | {'error', 'not_found'}.
+    [] | [{reference(), pid()}].
 %% @doc
 %%      returns all acceptors.
 %% @end
-fetch(AccSup) when erlang:is_pid(AccSup) ->
-    case director:get_pids(AccSup) of
-        {ok, [Acc]} ->
-            {ok, Acc};
-        {ok, []} ->
-            {error, not_found}
-    end.
+fetch(AccRootSup) when erlang:is_pid(AccRootSup) ->
+    {ok, Pids} = director:get_pids(AccRootSup),
+    Fold =
+        fun
+            ({ok, AccInfo}, Acc) ->
+                [AccInfo|Acc];
+            (_, Acc) ->
+                Acc
+        end,
+    lists:foldl(Fold, [], [etcp_acceptor_sup:fetch(AccSupPid) || {_, AccSupPid} <- Pids]).
 
 
 -spec
 sleep(etcp_types:name()) ->
-    'ok' | {'error', 'not_found'}.
-sleep(AccSup) when erlang:is_pid(AccSup) ->
-    case fetch(AccSup) of
-        {ok, {_, Pid}} ->
-            etcp_acceptor:sleep(Pid);
-        {error, not_found}=Err ->
-            Err
-    end.
+    'ok'.
+sleep(AccRootSup) when erlang:is_pid(AccRootSup) ->
+    {ok, AccSups} = director:get_pids(AccRootSup),
+    ForEach =
+        fun({_, AccPid}) ->
+            etcp_acceptor_sup:sleep(AccPid)
+        end,
+    lists:foreach(ForEach, AccSups).
 
 
 -spec
 accept(etcp_types:name()) ->
-    'ok' | {'error', 'not_found'}.
-accept(AccSup) when erlang:is_pid(AccSup) ->
-    case fetch(AccSup) of
-        {ok, {_, Pid}} ->
-            etcp_acceptor:accept(Pid);
-        {error, not_found}=Err ->
-            Err
+    'ok'.
+accept(AccRootSup) when erlang:is_pid(AccRootSup) ->
+    {ok, AccSups} = director:get_pids(AccRootSup),
+    ForEach =
+        fun({_, AccPid}) ->
+            etcp_acceptor_sup:accept(AccPid)
+        end,
+    lists:foreach(ForEach, AccSups).
+
+
+-spec
+modes(etcp_types:name()) ->
+    etcp_types:acceptor_mode() | [etcp_types:acceptor_mode()].
+modes(AccRootSup) when erlang:is_pid(AccRootSup) ->
+    {ok, AccSups} = director:get_pids(AccRootSup),
+    Modes = [Mode
+            || Mode <- [etcp_acceptor_sup:mode(AccSupPid) || {_, AccSupPid} <- AccSups]
+            ,Mode == ?ACCEPTOR_ACCEPT_MODE orelse Mode == ?ACCEPTOR_SLEEP_MODE],
+    case Modes of
+        [Mode|_] ->
+            All =
+                fun(Mode_) ->
+                    if
+                        Mode == Mode_ ->
+                            true;
+                        true ->
+                            false
+                    end
+                end,
+            case lists:all(All, Modes) of
+                true ->
+                    Mode;
+                false ->
+                    Modes
+            end;
+        _ ->
+            Modes
     end.
 
 
 -spec
-mode(etcp_types:name()) ->
-    etcp_types:acceptor_mode() | {'error', 'not_found'}.
-mode(AccSup) when erlang:is_pid(AccSup) ->
-    case fetch(AccSup) of
-        {ok, {_, Pid}} ->
-            etcp_acceptor:mode(Pid);
-        {error, not_found}=Err ->
-            Err
-    end.
-
-
--spec
-start_acceptor(etcp_types:name()) ->
+start_acceptor_sup(etcp_types:name(), term(), etcp_types:name()) ->
     'ok' | etcp_types:error().
-start_acceptor(AccSup) when erlang:is_pid(AccSup) ->
-    case director:start_child(AccSup, #{start => {etcp_connection, start_link, []}
-                                       ,id => erlang:make_ref()
-                                       ,append => true}) of
+start_acceptor_sup(AccRootSup, Id, ProcReg) when erlang:is_pid(AccRootSup) andalso
+                                                 ?is_process_registry(ProcReg)  ->
+    case director:start_child(AccRootSup, #{start => {etcp_acceptor_sup, start_link, [ProcReg]}
+                                           ,id => Id
+                                           ,append => true}) of
         {ok, _} ->
             ok;
-        {error, _}=Err ->
+        Err -> % {error, _}
             Err
     end.
+
+
+-spec
+start_acceptor_sup(etcp_types:name(), term()) ->
+    'ok' | etcp_types:error().
+start_acceptor_sup(AccRootSup, Id) when erlang:is_pid(AccRootSup) ->
+    start_acceptor_sup(AccRootSup, Id, undefined).
 
 %% -------------------------------------------------------------------------------------------------
 %% 'director' callbacks:
 
-%% @hidden
-init({Mod, InitArg, Opts, LSock, ProcReg}) ->
-    AcceptorChildSpec = #{start => {etcp_acceptor
-                                   ,start_link
-                                   ,[Mod, InitArg, Opts, LSock, ProcReg]}
-                         ,id => etcp_acceptor},
-    {ok, #?S{errors = []}, [AcceptorChildSpec]}.
+init({Mod, InitArg, Opts, LSock}) ->
+    DefChildSpec = #{start => {etcp_acceptor_sup, start_link, [Mod, InitArg, Opts, LSock]}
+                    ,type => sup},
+    {ok, #?S{errors = []}, [], DefChildSpec}.
 
 
 %% @hidden

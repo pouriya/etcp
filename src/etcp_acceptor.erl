@@ -1,187 +1,214 @@
-%%%-------------------------------------------------------------------
-%%% @author pouriya
-%%% @copyright (C) 2018, <COMPANY>
-%%% @doc
+%%% ------------------------------------------------------------------------------------------------
+%%% ETCP is available for use under the following license, commonly known as the 3-clause (or
+%%% "modified") BSD license:
 %%%
-%%% @end
-%%% Created : 09. Apr 2018 10:47 PM
-%%%-------------------------------------------------------------------
--module(etcp_acceptor).
--author("pouriya").
+%%% Copyright (c) 2017-2018, Pouriya Jahanbakhsh
+%%% (pouriya.jahanbakhsh@gmail.com)
+%%% All rights reserved.
+%%%
+%%% Redistribution and use in source and binary forms, with or without modification, are permitted
+%%% provided that the following conditions are met:
+%%%
+%%% 1. Redistributions of source code must retain the above copyright notice, this list of
+%%%    conditions and the following disclaimer.
+%%%
+%%% 2. Redistributions in binary form must reproduce the above copyright notice, this list of
+%%%    conditions and the following disclaimer in the documentation and/or other materials provided
+%%%    with the distribution.
+%%%
+%%% 3. Neither the name of the copyright holder nor the names of its contributors may be used to
+%%%    endorse or promote products derived from this software without specific prior written
+%%%    permission.
+%%%
+%%% THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND ANY EXPRESS OR
+%%% IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND
+%%% FITNESS FOR A  PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR
+%%% CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+%%% CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+%%% SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+%%% THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
+%%% OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+%%% POSSIBILITY OF SUCH DAMAGE.
+%%% ------------------------------------------------------------------------------------------------
+%% @author  Pouriya Jahanbakhsh <pouriya.jahanbakhsh@gmail.com>
+%% @version 17.9.10
+%% @hidden
+%% -------------------------------------------------------------------------------------------------
+-module(etcp_acceptor_sup2).
+-author("pouriya.jahanbakhsh@gmail.com").
+%% -------------------------------------------------------------------------------------------------
+%% Exports:
 
+%% API:
 -export([start_link/5
-        ,mode/1
+        ,fetch/1
         ,sleep/1
         ,accept/1
-        ,accept/3]).
+        ,mode/1
+        ,start_acceptor/1]).
 
--export([init/6
-        ,loop/3
-        ,handle_debug/3]).
+%% 'director' callback:
+-export([init/1
+        ,handle_start/4
+        ,handle_exit/5
+        ,handle_terminate/5
+        ,terminate/2]).
 
-%% API
--export([]).
--include("internal/etcp_guard.hrl").
--include("internal/etcp_acceptor.hrl").
--define(DEF_DEBUG, []).
--define(DEF_TRANSPORT_MODULE, 'etcp_transporter_tcp').
--define(DEF_START_OPTIONS, []).
--define(DEF_TRANSPORT_OPTIONS, []).
--define(GEN_CALL_TAG, '$gen_call').
+%% -------------------------------------------------------------------------------------------------
+%% Records & Macros & Includes:
+
 -define(S, state).
--record(?S, {module
-            ,init_argument
-            ,name
-            ,options
-            ,mode
-            ,process_registry
-            ,listen_socket
-            ,transporter_state
-            ,transporter}).
+-record(?S, {errors}).
+-define(DEF_START_OPTS, []).
+
+-include("internal/etcp_guard.hrl").
+
+%% -------------------------------------------------------------------------------------------------
+%% API functions:
 
 -spec
 start_link(module(), term(), etcp_types:start_options(), etcp_types:socket(), pid()) ->
     etcp_types:start_return().
-start_link(Mod, InitArg, Opts, LSock, ProcReg) when erlang:is_atom(Mod) andalso
-                                                    erlang:is_map(Opts) andalso
+start_link(Mod, InitArg, Opts, LSock, ProcReg) when erlang:is_map(Opts) andalso
                                                     ?is_process_registry(ProcReg) ->
-    proc_lib:start_link(?MODULE, init, [erlang:self(), Mod, InitArg, Opts, LSock, ProcReg]).
+    director:start_link(?MODULE, {Mod, InitArg, Opts, LSock, ProcReg}, ?DEF_START_OPTS).
 
 
-mode(Acceptor) when erlang:is_pid(Acceptor) ->
-    gen_server:call(Acceptor, mode).
-
-
-sleep(Acceptor) when erlang:is_pid(Acceptor) ->
-    gen_server:call(Acceptor, ?ACCEPTOR_SLEEP_MODE).
-
-
-accept(Acceptor) when erlang:is_pid(Acceptor) ->
-    gen_server:call(Acceptor, ?ACCEPTOR_ACCEPT_MODE).
-
-
-init(Parent, Mod, InitArg, Opts, LSock, ProcReg) ->
-    TrMod = etcp_utils:get_value(transporter, Opts, ?DEF_TRANSPORT_MODULE, fun erlang:is_atom/1),
-    TrOpts = etcp_utils:get_value(transporter_options, Opts, ?DEF_TRANSPORT_OPTIONS, fun(_) -> true end),
-    case etcp_transporter:init(TrMod, TrOpts) of
-        {ok, TrState} ->
-            DbgOpts = etcp_utils:get_value(acceptor_debug, Opts, ?DEF_DEBUG, fun erlang:is_list/1),
-            TrMod = etcp_utils:get_value(transporter, Opts, ?DEF_TRANSPORT_MODULE, fun erlang:is_atom/1),
-
-            Mode = etcp_utils:get_value(acceptor_mode, Opts, ?DEF_ACCEPTOR_MODE, fun filter_mode/1),
-            proc_lib:init_ack(Parent, {ok, erlang:self()}),
-            Name = erlang:self(),
-            Dbg = etcp_utils:debug_options(?MODULE, Name, DbgOpts),
-            Dbg2 = debug(Name, Dbg, {start, TrMod, LSock, ProcReg, Mode}),
-            State = #?S{module = Mod
-                       ,init_argument = InitArg
-                       ,name = Name
-                       ,options = Opts
-                       ,mode = Mode
-                       ,process_registry = ProcReg
-                       ,transporter_state = TrState
-                       ,transporter = TrMod
-                       ,listen_socket = LSock},
-            loop(Parent, Dbg2, State);
-        {error, Rsn}=Err ->
-            proc_lib:init_ack(Parent, Err),
-            erlang:exit(Rsn)
+-spec
+fetch(etcp_types:name()) ->
+    {'ok', {reference(), pid()}} | {'error', 'not_found'}.
+%% @doc
+%%      returns all acceptors.
+%% @end
+fetch(AccSup) when erlang:is_pid(AccSup) ->
+    case director:get_pids(AccSup) of
+        {ok, [Acc]} ->
+            {ok, Acc};
+        {ok, []} ->
+            {error, not_found}
     end.
 
 
-loop(Parent
-    ,Dbg
-    ,#?S{mode = ?ACCEPTOR_ACCEPT_MODE
-        ,transporter = TrMod
-        ,listen_socket = LSock
-        ,transporter_state = TrState
-        ,options = Opts
-        ,name = Name
-        ,module = Mod
-        ,init_argument = InitArg
-        ,process_registry = ProcReg}=State) ->
-    try etcp_connection:start_link(Mod, InitArg, Opts, TrMod, LSock, TrState) of
-        {ok, Pid, TrState2} ->
-            Dbg2 = debug(Name, Dbg, {start_connection, Pid}),
-            Dbg3 =
-                if
-                    erlang:is_pid(ProcReg) ->
-                        etcp_server_process_registry:new(ProcReg, Pid),
-                        debug(Name, Dbg2, {process_registry, Pid, ProcReg});
-                    true ->
-                        Dbg2
-                end,
-            process_message(Parent, Dbg3, State#?S{transporter_state = TrState2});
-        {error, {socket_accept, [{reason, timeout}|_]}} ->
-            process_message(Parent, Dbg, State);
-        {error, {socket_accept, [{reason, emfile}|_]}} ->
-            error_logger:warning_msg("ETCP acceptor ~p: too many alive connections", [Name]),
-            process_message(Parent, Dbg, State);
-        {error, Rsn} ->
-            terminate(Dbg, State, Rsn)
-    catch
-        _:Rsn ->
-            error_logger:warning_msg("ETCP acceptor ~p: could not start new process for reason ~p"
-                                    ,[Name, Rsn]),
-            timer:sleep(100),
-            process_message(Parent, Dbg, State)
-    end;
-loop(Parent, Dbg, State) ->
-    process_message(Parent, Dbg, State).
-
-
-process_message(Parent, Dbg, #?S{name = Name}=State) ->
-    receive
-        Msg ->
-            process_message(Parent, debug(Name, Dbg, {in, Msg}), State, Msg)
-    after 0 ->
-        ?MODULE:loop(Parent, Dbg, State)
+-spec
+sleep(etcp_types:name()) ->
+    'ok' | {'error', 'not_found'}.
+sleep(AccSup) when erlang:is_pid(AccSup) ->
+    case fetch(AccSup) of
+        {ok, {_, Pid}} ->
+            etcp_acceptor_manager:sleep(Pid);
+        {error, not_found}=Err ->
+            Err
     end.
 
 
-process_message(Parent, Dbg, #?S{name = Name}=State, {?GEN_CALL_TAG, From, Request}) ->
-    {Dbg2, State2} = process_request(debug(Name, Dbg, {call, From, Request}), State, From, Request),
-    ?MODULE:loop(Parent, Dbg2, State2).
+-spec
+accept(etcp_types:name()) ->
+    'ok' | {'error', 'not_found'}.
+accept(AccSup) when erlang:is_pid(AccSup) ->
+    case fetch(AccSup) of
+        {ok, {_, Pid}} ->
+            etcp_acceptor_manager:accept(Pid);
+        {error, not_found}=Err ->
+            Err
+    end.
 
 
-process_request(Dbg, #?S{name = Name, mode = Mode}=State, From, mode) ->
-    {reply(Name, Dbg, From, Mode), State};
-process_request(Dbg, #?S{name = Name}=State, From, Mode) when Mode =:= ?ACCEPTOR_ACCEPT_MODE orelse
-                                                              Mode =:= ?ACCEPTOR_SLEEP_MODE ->
-    {reply(Name, Dbg, From, Mode), State#?S{mode = Mode}};
-process_request(Dbg, #?S{name = Name}=State, From, Request) ->
-    {reply(Name, Dbg, From, {error, {unknown, [{request, Request}]}}), State}.
+-spec
+mode(etcp_types:name()) ->
+    etcp_types:acceptor_mode() | {'error', 'not_found'}.
+mode(AccSup) when erlang:is_pid(AccSup) ->
+    case fetch(AccSup) of
+        {ok, {_, Pid}} ->
+            etcp_acceptor_manager:mode(Pid);
+        {error, not_found}=Err ->
+            Err
+    end.
 
 
-terminate(_, _, Rsn) ->
-    erlang:exit(Rsn).
+-spec
+start_acceptor(etcp_types:name()) ->
+    'ok' | etcp_types:error().
+start_acceptor(AccSup) when erlang:is_pid(AccSup) ->
+    case director:start_child(AccSup, #{start => {etcp_connection, start_link, []}
+                                       ,id => erlang:make_ref()
+                                       ,append => true}) of
+        {ok, _} ->
+            ok;
+        {error, _}=Err ->
+            Err
+    end.
+
+%% -------------------------------------------------------------------------------------------------
+%% 'director' callbacks:
+
+%% @hidden
+init({Mod, InitArg, Opts, LSock, ProcReg}) ->
+    AcceptorChildSpec = #{start => {etcp_acceptor
+                                   ,start_link
+                                   ,[Mod, InitArg, Opts, LSock, ProcReg]}
+                         ,id => etcp_acceptor},
+    {ok, #?S{errors = []}, [AcceptorChildSpec]}.
 
 
-debug(_, [], _) ->
-    [];
-debug(Name, Dbg, Event) ->
-    sys:handle_debug(Dbg, fun ?MODULE:handle_debug/3, Name, Event).
+%% @hidden
+handle_start(_, ChildState, State, _) ->
+    {ok, ChildState, State, [{log, false}]}.
 
 
-handle_debug(IODev, Event, Name) ->
-    io:format(IODev, "*DBG* ETCP acceptor ~p got debug event ~p\n", [Name, Event]).
+%% @hidden
+handle_exit(_, ChildState, Rsn, #?S{errors = Errs}=State, _) ->
+    {State2, LogFlag} =
+        case lists:member(Rsn, Errs) of
+            true ->
+                {State, false};
+            _ ->
+                LogFlag2 =
+                    if
+                        Rsn =:= normal orelse Rsn =:= shutdown ->
+                            false;
+                        true ->
+                            true
+                    end,
+                {State#?S{errors = [Rsn|Errs]}, LogFlag2}
+        end,
+    {stop, ChildState, State2, [{log, LogFlag}]}.
 
 
-filter_mode(?ACCEPTOR_ACCEPT_MODE) ->
-    true;
-filter_mode(?ACCEPTOR_SLEEP_MODE) ->
-    true;
-filter_mode(_) ->
-    false.
+%% @hidden
+handle_terminate(_, ChildState, Rsn, #?S{errors = Errs}=State, _) ->
+    {State2, LogFlag} =
+        case lists:member(Rsn, Errs) of
+            true ->
+                {State, false};
+            _ ->
+                LogFlag2 =
+                    if
+                        Rsn =:= normal orelse Rsn =:= shutdown ->
+                            false;
+                        true ->
+                            true
+                    end,
+                {State#?S{errors = [Rsn|Errs]}, LogFlag2}
+        end,
+    {ok, ChildState, State2, [{log, LogFlag}]}.
 
 
-reply(Name, Dbg, {Pid, Tag}=Client, Msg) ->
-    catch Pid ! {Tag, Msg},
-    debug(Name, Dbg, {out, Client, Msg});
-reply(Name, Dbg, Pid, Msg) ->
-    catch Pid ! Msg,
-    debug(Name, Dbg, {out, Pid, Msg}).
-
-
-accept(TrMod, LSock, TrState) ->
-    etcp_transporter:accept(TrMod, LSock, TrState).
+%% @hidden
+terminate(Rsn, #?S{errors = Errs}) ->
+    Rsn2 =
+        case Errs of
+            [Rsn3] ->
+                Rsn3;
+            [] ->
+                Rsn;
+            _ ->
+                Errs
+        end,
+    LogFlag =
+        if
+            Rsn2 =:= normal orelse Rsn2 =:= shutdown ->
+                false;
+            true ->
+                true
+        end,
+    {new_error, Rsn2, [{log, LogFlag}]}.

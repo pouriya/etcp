@@ -49,5 +49,9 @@ handle_call(fetch, _, State) ->
     {reply, State, State}.
 
 
-terminate(_, _) ->
-    ok.
+terminate(_, S) ->
+    StopFun =
+        fun(Pid) ->
+            catch sys:terminate(Pid, normal, 0)
+        end,
+    lists:foreach(StopFun, S).

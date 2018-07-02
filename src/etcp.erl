@@ -148,8 +148,8 @@ start_link_server(module(), init_argument(), port_number()) ->
 %% @doc
 %%      Starts and links a TCP server.
 %% @end
-start_link_server(Mod, InitArg, Port) when erlang:is_atom(Mod),
-                                           erlang:is_integer(Port) ->
+start_link_server(Mod, InitArg, Port) when erlang:is_atom(Mod) andalso
+                                           erlang:is_integer(Port)  ->
     etcp_server:start_link(Mod, InitArg, Port).
 
 
@@ -268,7 +268,7 @@ start_link_connection_pool(module(), init_argument(), addresses()) ->
 %%      Starts and links a socket connection pool.
 %% @end
 start_link_connection_pool(Mod, InitArg, Addrs) when erlang:is_atom(Mod) andalso
-                                                     erlang:is_list(Addrs) ->
+                                                     erlang:is_list(Addrs)    ->
     etcp_connection_pool:start_link(Mod, InitArg, Addrs).
 
 
